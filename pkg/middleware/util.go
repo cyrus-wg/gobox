@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+type contextKey string
+
 func getRealUserIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		ips := strings.Split(xff, ",")
