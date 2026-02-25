@@ -37,14 +37,19 @@ func SendJSONResponseWithStatus(w http.ResponseWriter, statusCode int, payload a
 func SendErrorJSONResponse(ctx context.Context, w http.ResponseWriter, err error) {
 	w.Header().Set(content_type_key, application_json)
 
-	httpErr, _ := httperror.ConvertToHTTPError(err)
+	httpErr, converted := httperror.ConvertToHTTPError(err)
 	w.WriteHeader(httpErr.HttpStatusCode)
 
 	if !httperror.IsWithExtraInfoEnabled() {
 		httpErr.ExtraInfo = nil
 	}
 
-	logger.Infow(ctx, "Error response being sent", "error_response", httpErr)
+	if converted {
+		logger.Errorw(ctx, "Error response", "http_error", httpErr, "error", err)
+	} else {
+		logger.Infow(ctx, "Error response", "http_error", httpErr)
+	}
+
 	json.NewEncoder(w).Encode(httpErr)
 }
 
