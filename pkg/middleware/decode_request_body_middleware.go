@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,25 +58,32 @@ func DecodeRequestBodyMiddleware[T any](logRequestBody ...bool) func(next http.H
 
 			if err := json.Unmarshal(bodyBytes, &request); err != nil {
 				logger.Errorw(ctx, "Failed to decode request body", "error", err)
-				httpErr := httperror.NewInternalServerError("DECODE_BODY_ERROR", "Failed to decode request body", err, err)
+				httpErr := httperror.NewBadRequestError("DECODE_BODY_ERROR", "Failed to decode request body", err, err)
 				httpresponse.SendErrorJSONResponse(ctx, w, httpErr)
 				return
 			}
 
 			if err := validate.Struct(request); err != nil {
 				logger.Infow(ctx, "Validation failed for request body", "target_type", reflect.TypeOf(request), "request", request, "error", err)
-				var errors []string
-				for _, err := range err.(validator.ValidationErrors) {
-					message := fmt.Sprintf("%s: failed %s validation", err.Field(), err.Tag())
 
-					if err.Param() != "" {
-						message += fmt.Sprintf(" (expected: %s)", err.Param())
-					}
-
-					errors = append(errors, message)
+				var validationErrs validator.ValidationErrors
+				if !errors.As(err, &validationErrs) {
+					// Not a ValidationErrors (e.g., InvalidValidationError) — treat as internal error
+					httpErr := httperror.NewInternalServerError("REQUEST_BODY_VALIDATION_ERROR", "Failed to process request body validation", err, err)
+					httpresponse.SendErrorJSONResponse(ctx, w, httpErr)
+					return
 				}
 
-				httpErr := httperror.NewInternalServerError("VALIDATION_ERROR", "Request body validation failed", err, map[string]any{"validation_errors": errors})
+				var fieldErrors []string
+				for _, fe := range validationErrs {
+					message := fmt.Sprintf("%s: failed %s validation", fe.Field(), fe.Tag())
+					if fe.Param() != "" {
+						message += fmt.Sprintf(" (expected: %s)", fe.Param())
+					}
+					fieldErrors = append(fieldErrors, message)
+				}
+
+				httpErr := httperror.NewBadRequestError("REQUEST_BODY_CONSTRAINT_VIOLATION", "Request body violates constraints", err, map[string]any{"validation_errors": fieldErrors})
 				httpresponse.SendErrorJSONResponse(ctx, w, httpErr)
 				return
 			}
