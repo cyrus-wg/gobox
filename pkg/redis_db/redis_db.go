@@ -4,152 +4,84 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/cyrus-wg/gobox/pkg/logger"
 	"github.com/redis/go-redis/v9"
 )
 
-var (
-	defaultClient redis.UniversalClient
-	defaultMu     sync.RWMutex // protects defaultClient for concurrent access
-)
+// GetClient returns the underlying redis.UniversalClient.
+// Returns nil if Connect has not been called or Close has been called.
+func (rc *RedisClient) GetClient() redis.UniversalClient {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
 
-// GetClient returns the package-level Redis client.
-// Returns nil if GlobalConnect has not been called yet.
-func GetClient() redis.UniversalClient {
-	defaultMu.RLock()
-	defer defaultMu.RUnlock()
-
-	return defaultClient
+	return rc.client
 }
 
-// SetClient replaces the package-level Redis client. It is safe to call
-// concurrently. The caller is responsible for closing any previously set
-// client if it is no longer needed.
-//
-// Prefer creating separate clients via Connect when different parts of
-// your application need different Redis configurations.
-func SetClient(client redis.UniversalClient) {
-	defaultMu.Lock()
-	defaultClient = client
-	defaultMu.Unlock()
+// SetClient replaces the underlying redis.UniversalClient.
+// The caller is responsible for closing the previously set client if needed.
+func (rc *RedisClient) SetClient(client redis.UniversalClient) {
+	rc.mu.Lock()
+	rc.client = client
+	rc.mu.Unlock()
 }
 
-// Config holds all settings for opening a Redis connection.
-// Zero values are replaced with production-ready defaults via applyDefaults.
-//
-// Timeout and backoff fields use time.Duration so callers can express values
-// naturally (e.g. 5*time.Second) and the special value -1 disables the
-// corresponding timeout/retry.
-type Config struct {
-	// Addrs is the list of Redis server addresses (host:port).
-	//   - Single address                  → standalone mode
-	//   - Multiple addresses + MasterName → Sentinel mode
-	//   - Multiple addresses (no master)  → Cluster mode
-	Addrs      []string
-	Password   string
-	DB         int    // ignored in Cluster mode
-	MasterName string // non-empty enables Sentinel mode
-	TLSEnabled bool
-
-	// DialTimeout is the max time to establish a TCP connection (including TLS).
-	// Set to -1 to disable. Default: 5s.
-	DialTimeout time.Duration
-
-	// ReadTimeout is the per-command deadline for reading a response from server.
-	// Set to -1 to disable — required for blocking commands (BLPOP, SUBSCRIBE,
-	// XREAD BLOCK). When disabled, always bound calls with a context deadline.
-	// Default: 3s.
-	ReadTimeout time.Duration
-
-	// WriteTimeout is the per-command deadline for sending command bytes.
-	// Set to -1 to disable. Default: 3s.
-	WriteTimeout time.Duration
-
-	// PoolSize is the total pool capacity: the maximum number of socket
-	// connections (idle + in-use combined) maintained per node.
-	// Default: 10.
-	PoolSize int
-
-	// MinIdleConns is the number of idle connections pre-warmed at startup
-	// and maintained even during quiet periods.
-	// Must satisfy: MinIdleConns ≤ MaxIdleConns ≤ PoolSize.
-	// Default: 2.
-	MinIdleConns int
-
-	// MaxIdleConns is the maximum number of idle connections retained in the
-	// pool after a load spike. Excess idle connections are closed.
-	// Must satisfy: MinIdleConns ≤ MaxIdleConns ≤ PoolSize.
-	// Default: 5.
-	MaxIdleConns int
-
-	// ConnMaxIdleTime is how long a connection may sit idle before being closed.
-	// Shorter values free server-side resources faster during quiet periods.
-	// Default: 5 minutes.
-	ConnMaxIdleTime time.Duration
-
-	// ConnMaxLifetime is the maximum age of any connection regardless of activity.
-	// Forces periodic recycling to recover from stale/broken connections.
-	// 0 means no max lifetime. Default: 30 minutes.
-	ConnMaxLifetime time.Duration
-
-	// MaxRetries is the number of retries on transient failures.
-	// Set to -1 to disable all retries.
-	// Default: 3.
-	MaxRetries int
-
-	// MinRetryBackoff is the minimum wait between retries (jittered).
-	// Set to -1 to disable backoff (retry immediately).
-	// Default: 8ms.
-	MinRetryBackoff time.Duration
-
-	// MaxRetryBackoff is the maximum wait between retries.
-	// Worst-case extra latency ≈ MaxRetries × MaxRetryBackoff.
-	// Set to -1 to disable backoff cap.
-	// Default: 512ms.
-	MaxRetryBackoff time.Duration
+// GetConfig returns a copy of the current connection config.
+func (rc *RedisClient) GetConfig() Config {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	return rc.redisConfig
 }
 
-// GlobalConnect creates a new Redis client from config, verifies it with
-// PING, and stores it as the package-level client. It is safe to call
-// concurrently (e.g. during a hot config reload).
-func GlobalConnect(ctx context.Context, config Config) error {
-	client, err := Connect(ctx, config)
-	if err != nil {
-		return err
-	}
-
-	SetClient(client)
-	return nil
+// SetConfig replaces the stored config. This does not reconnect —
+// call Connect or Reconnect afterwards to apply the new config.
+func (rc *RedisClient) SetConfig(config Config) {
+	rc.mu.Lock()
+	rc.redisConfig = config
+	rc.mu.Unlock()
 }
 
-// Connect creates and validates a new Redis client from config.
-// The returned client is independent of the package-level global —
-// use GlobalConnect or SetClient to install it as the global.
-func Connect(ctx context.Context, config Config) (redis.UniversalClient, error) {
+// GetClientName returns the logical name of this client (used in log messages).
+func (rc *RedisClient) GetClientName() string {
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+	return rc.clientName
+}
+
+// SetClientName changes the logical name of this client.
+func (rc *RedisClient) SetClientName(name string) {
+	rc.mu.Lock()
+	rc.clientName = name
+	rc.mu.Unlock()
+}
+
+// Connect establishes a connection to Redis using the stored config.
+// It applies defaults to zero-value config fields, validates pool settings,
+// creates the client, and verifies connectivity with PING.
+func (rc *RedisClient) Connect(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
-		logger.Warn(ctx, "Context is nil, using context.Background() in Redis Connect")
+		logger.Warnw(ctx, "Context is nil, using context.Background() in Redis Connect", "clientName", rc.GetClientName())
 	}
+
+	config := applyDefaults(rc.GetConfig())
+	rc.SetConfig(config) // persist applied defaults for future reference
 
 	if len(config.Addrs) == 0 {
-		return nil, errors.New("redisdb: at least one address is required in Config.Addrs")
+		return errors.New("redisdb: at least one address is required in Config.Addrs")
 	}
-
-	applyDefaults(&config)
 
 	// Validate pool hierarchy. go-redis silently clamps invalid values which
 	// masks misconfiguration — fail explicitly instead.
 	if config.MinIdleConns > config.MaxIdleConns {
-		return nil, errors.New("redisdb: MinIdleConns must be ≤ MaxIdleConns")
+		return errors.New("redisdb: MinIdleConns must be ≤ MaxIdleConns")
 	}
 	if config.MaxIdleConns > config.PoolSize {
-		return nil, errors.New("redisdb: MaxIdleConns must be ≤ PoolSize")
+		return errors.New("redisdb: MaxIdleConns must be ≤ PoolSize")
 	}
 
-	logger.Info(ctx, "Connecting to Redis")
+	logger.Infow(ctx, "Connecting to Redis", "clientName", rc.GetClientName())
 
 	options := &redis.UniversalOptions{
 		Addrs:    config.Addrs,
@@ -176,7 +108,7 @@ func Connect(ctx context.Context, config Config) (redis.UniversalClient, error) 
 	// Sentinel mode: requires MasterName
 	if config.MasterName != "" {
 		options.MasterName = config.MasterName
-		logger.Infof(ctx, "Using Redis Sentinel with master name: %s", config.MasterName)
+		logger.Infow(ctx, "Using Redis Sentinel", "masterName", config.MasterName, "clientName", rc.GetClientName())
 	}
 
 	// DB selection is only supported for standalone and Sentinel modes.
@@ -184,39 +116,52 @@ func Connect(ctx context.Context, config Config) (redis.UniversalClient, error) 
 	isClusterMode := len(config.Addrs) > 1 && config.MasterName == ""
 	if !isClusterMode {
 		options.DB = config.DB
-		logger.Infof(ctx, "Using Redis DB: %d", config.DB)
+		logger.Infow(ctx, "Using Redis DB", "db", config.DB, "clientName", rc.GetClientName())
 	} else {
-		logger.Info(ctx, "Using Redis Cluster mode (DB selection not supported, using DB 0)")
+		logger.Infow(ctx, "Using Redis Cluster mode (DB selection not supported, using DB 0)", "clientName", rc.GetClientName())
 	}
 
 	if config.TLSEnabled {
 		options.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
-		logger.Info(ctx, "TLS is enabled for Redis connection")
+		logger.Infow(ctx, "TLS is enabled for Redis connection", "clientName", rc.GetClientName())
 	}
 
-	client := redis.NewUniversalClient(options)
+	rc.SetClient(redis.NewUniversalClient(options))
 
 	// Verify the connection is alive before returning.
-	if err := client.Ping(ctx).Err(); err != nil {
-		_ = client.Close() // release pool resources on failure
-		logger.Errorw(ctx, "Failed to connect to Redis", "error", err)
-		return nil, err
+	// Use GetClient() to go through the mutex, not rc.client directly.
+	if err := rc.GetClient().Ping(ctx).Err(); err != nil {
+		rc.Close() // close client if ping fails
+		logger.Errorw(ctx, "Failed to connect to Redis", "error", err, "clientName", rc.GetClientName())
+		return err
 	}
 
-	logger.Info(ctx, "Redis connection established successfully")
-	return client, nil
+	logger.Infow(ctx, "Redis connection established successfully", "clientName", rc.GetClientName())
+	return nil
 }
 
-// Close gracefully shuts down the package-level Redis client and releases
-// all pool resources. Safe to call concurrently. Returns nil if no global
-// client is set.
-func Close() error {
-	defaultMu.Lock()
-	client := defaultClient
-	defaultClient = nil
-	defaultMu.Unlock()
+// Reconnect closes the existing connection and re-establishes it using the
+// stored config. Use this after a topology change or config update.
+func (rc *RedisClient) Reconnect(ctx context.Context) error {
+	logger.Infow(ctx, "Reconnecting to Redis", "clientName", rc.GetClientName())
+	if err := rc.Close(); err != nil {
+		logger.Errorw(ctx, "Error closing existing Redis client during reconnect", "error", err, "clientName", rc.GetClientName())
+		// Continue with reconnect attempt even if close fails, as the old client may be in a bad state.
+	}
+
+	return rc.Connect(ctx)
+}
+
+// Close gracefully shuts down the Redis client and releases all pool
+// resources. The client is set to nil after closing. Safe to call
+// concurrently. Returns nil if no client is set.
+func (rc *RedisClient) Close() error {
+	rc.mu.Lock()
+	client := rc.client
+	rc.client = nil
+	rc.mu.Unlock()
 
 	if client != nil {
 		return client.Close()
@@ -224,9 +169,10 @@ func Close() error {
 	return nil
 }
 
-// applyDefaults fills zero-value fields with production-ready defaults.
-// Fields set to -1 by the caller (disable sentinel) are never overwritten.
-func applyDefaults(config *Config) {
+// applyDefaults returns a copy of config with sensible defaults filled in for
+// any zero-value fields. A value of -1 means "explicitly disabled" and is
+// preserved. This is called at the start of Connect.
+func applyDefaults(config Config) Config {
 	// Timeouts — only apply default when field is 0 (unset).
 	// -1 means "caller explicitly disabled this timeout" and must be preserved.
 	if config.DialTimeout == 0 {
@@ -266,4 +212,6 @@ func applyDefaults(config *Config) {
 	if config.MaxRetryBackoff == 0 {
 		config.MaxRetryBackoff = 512 * time.Millisecond
 	}
+
+	return config
 }
