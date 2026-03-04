@@ -8,6 +8,7 @@ import (
 
 	gormdb "github.com/cyrus-wg/gobox/pkg/gorm_db"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // ──────────────────────────────────────────────
@@ -114,6 +115,12 @@ func runAllTests(ctx context.Context, driver gormdb.Driver, dsn string) error {
 	}{
 		{"Getters & Setters", testGettersSetters},
 		{"Connect with empty DSN", testConnectEmptyDSN},
+		{"Connect with nil context", testConnectNilContext},
+		{"Connect with unsupported driver", testConnectUnsupportedDriver},
+		{"applyDefaults preserves custom values", testApplyDefaultsCustomValues},
+		{"Custom GormConfig preserved", testCustomGormConfig},
+		{"NewGormLogger & LogMode", testGormLoggerAPI},
+		{"SetConfig re-applies defaults", testSetConfigDefaults},
 		{"CRUD", testCRUD},
 		{"Transaction commit (two-client)", testTxCommitTwoClients},
 		{"Transaction rollback (two-client)", testTxRollbackTwoClients},
@@ -121,6 +128,7 @@ func runAllTests(ctx context.Context, driver gormdb.Driver, dsn string) error {
 		{"SavePoint & RollbackToSavePoint (two-client)", testSavePoint},
 		{"ExecRawSQL (two-client)", testRawSQL},
 		{"Monitoring", testMonitoring},
+		{"Reconnect with monitoring", testReconnectWithMonitoring},
 		{"Reconnect", testReconnect},
 		{"Close idempotency", testCloseIdempotent},
 		{"Global functions", testGlobalFunctions},
@@ -196,6 +204,189 @@ func testConnectEmptyDSN(_ context.Context, _, _ *gormdb.DBClient) error {
 		return fmt.Errorf("expected error for empty DSN, got nil")
 	}
 	fmt.Printf("        ✓ empty DSN returned error: %s\n", err)
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// Connect with nil context → exercises the
+// nil-ctx fallback path (should not panic).
+// ──────────────────────────────────────────────
+
+func testConnectNilContext(_ context.Context, a, _ *gormdb.DBClient) error {
+	driver := a.GetConfig().Driver
+	dsn := a.GetConfig().DSN
+
+	tmp := gormdb.NewDBClient("nil-ctx", gormdb.Config{Driver: driver, DSN: dsn})
+	//nolint:staticcheck // intentionally passing nil context
+	if err := tmp.Connect(nil); err != nil {
+		return fmt.Errorf("connect with nil ctx: %w", err)
+	}
+	defer tmp.Close()
+
+	// Verify the connection is usable.
+	var count int64
+	if err := tmp.GetDB().Model(&Product{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("query after nil-ctx connect: %w", err)
+	}
+	fmt.Printf("        ✓ nil-ctx connect succeeded, row count: %d\n", count)
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// Connect with unsupported driver → must return
+// a dialector error.
+// ──────────────────────────────────────────────
+
+func testConnectUnsupportedDriver(_ context.Context, _, _ *gormdb.DBClient) error {
+	bad := gormdb.NewDBClient("bad-driver", gormdb.Config{
+		Driver: gormdb.Driver("sqlite"),
+		DSN:    "file::memory:",
+	})
+	err := bad.Connect(context.Background())
+	if err == nil {
+		return fmt.Errorf("expected error for unsupported driver, got nil")
+	}
+	fmt.Printf("        ✓ unsupported driver returned error: %s\n", err)
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// applyDefaults preserves custom values: when
+// the caller provides explicit pool/logger
+// settings, they must not be overwritten.
+// ──────────────────────────────────────────────
+
+func testApplyDefaultsCustomValues(_ context.Context, a, _ *gormdb.DBClient) error {
+	driver := a.GetConfig().Driver
+	dsn := a.GetConfig().DSN
+
+	ignFalse := false
+	custom := gormdb.Config{
+		Driver:                    driver,
+		DSN:                       dsn,
+		MaxOpenConns:              99,
+		MaxIdleConns:              77,
+		ConnMaxIdleTime:           1 * time.Minute,
+		ConnMaxLifetime:           2 * time.Minute,
+		SlowQueryThreshold:        500 * time.Millisecond,
+		IgnoreRecordNotFoundError: &ignFalse,
+		GormLogLevel:              gormlogger.Info,
+	}
+
+	tmp := gormdb.NewDBClient("custom-defaults", custom)
+	cfg := tmp.GetConfig()
+
+	assertEq("custom MaxOpenConns", 99, cfg.MaxOpenConns)
+	assertEq("custom MaxIdleConns", 77, cfg.MaxIdleConns)
+	assertEq("custom ConnMaxIdleTime", 1*time.Minute, cfg.ConnMaxIdleTime)
+	assertEq("custom ConnMaxLifetime", 2*time.Minute, cfg.ConnMaxLifetime)
+	assertEq("custom SlowQueryThreshold", 500*time.Millisecond, cfg.SlowQueryThreshold)
+	assertEq("custom IgnoreRecordNotFound", false, *cfg.IgnoreRecordNotFoundError)
+	assertEq("custom GormLogLevel", gormlogger.Info, cfg.GormLogLevel)
+
+	// GormConfig should have been created by applyDefaults.
+	assertNeq("GormConfig not nil", (*gorm.Config)(nil), cfg.GormConfig)
+
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// Custom GormConfig: when the caller supplies
+// their own *gorm.Config (with or without a
+// logger), it must be preserved as-is.
+// ──────────────────────────────────────────────
+
+func testCustomGormConfig(_ context.Context, a, _ *gormdb.DBClient) error {
+	driver := a.GetConfig().Driver
+	dsn := a.GetConfig().DSN
+
+	customLogger := gormdb.NewGormLogger()
+	customCfg := &gorm.Config{Logger: customLogger}
+
+	tmp := gormdb.NewDBClient("custom-gormcfg", gormdb.Config{
+		Driver:     driver,
+		DSN:        dsn,
+		GormConfig: customCfg,
+	})
+	resolvedCfg := tmp.GetConfig()
+
+	// The pointer should be preserved.
+	assertEq("GormConfig pointer preserved", true, resolvedCfg.GormConfig == customCfg)
+	assertEq("custom logger preserved", true, resolvedCfg.GormConfig.Logger == customLogger)
+
+	// Also verify Connect works with the custom config.
+	if err := tmp.Connect(context.Background()); err != nil {
+		return fmt.Errorf("connect with custom GormConfig: %w", err)
+	}
+	defer tmp.Close()
+
+	var count int64
+	if err := tmp.GetDB().Model(&Product{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("query after custom GormConfig connect: %w", err)
+	}
+	fmt.Printf("        ✓ custom GormConfig connect succeeded, row count: %d\n", count)
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// NewGormLogger & LogMode: exercise the
+// GormLogger constructor and LogMode method.
+// ──────────────────────────────────────────────
+
+func testGormLoggerAPI(_ context.Context, _, _ *gormdb.DBClient) error {
+	lg := gormdb.NewGormLogger()
+
+	// Defaults from NewGormLogger.
+	assertEq("default SlowThreshold", 200*time.Millisecond, lg.SlowThreshold)
+	assertEq("default LogLevel", gormlogger.Warn, lg.LogLevel)
+	assertEq("default IgnoreRecordNotFound", true, lg.IgnoreRecordNotFoundError)
+
+	// LogMode returns a new logger with the given level.
+	silent := lg.LogMode(gormlogger.Silent)
+	assertNeq("LogMode returns non-nil", nil, silent)
+
+	// The original should be unchanged (LogMode returns a clone).
+	assertEq("original level unchanged", gormlogger.Warn, lg.LogLevel)
+
+	// The new logger should have the requested level.
+	silentGL, ok := silent.(*gormdb.GormLogger)
+	assertEq("LogMode type assertion", true, ok)
+	assertEq("LogMode level", gormlogger.Silent, silentGL.LogLevel)
+
+	fmt.Println("        ✓ NewGormLogger / LogMode work correctly")
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// SetConfig re-applies defaults: calling
+// SetConfig with zero-value fields should fill
+// in the defaults.
+// ──────────────────────────────────────────────
+
+func testSetConfigDefaults(_ context.Context, a, _ *gormdb.DBClient) error {
+	driver := a.GetConfig().Driver
+	dsn := a.GetConfig().DSN
+
+	tmp := gormdb.NewDBClient("setconfig-test", gormdb.Config{
+		Driver:       driver,
+		DSN:          dsn,
+		MaxOpenConns: 50,
+	})
+
+	// SetConfig with only Driver/DSN — all pool fields should get defaults.
+	tmp.SetConfig(gormdb.Config{
+		Driver: driver,
+		DSN:    dsn,
+	})
+	cfg := tmp.GetConfig()
+
+	assertEq("SetConfig MaxOpenConns default", 25, cfg.MaxOpenConns)
+	assertEq("SetConfig MaxIdleConns default", 10, cfg.MaxIdleConns)
+	assertEq("SetConfig SlowQuery default", 200*time.Millisecond, cfg.SlowQueryThreshold)
+	assertEq("SetConfig GormLogLevel default", gormlogger.Warn, cfg.GormLogLevel)
+	assertNeq("SetConfig GormConfig not nil", (*gorm.Config)(nil), cfg.GormConfig)
+
+	fmt.Println("        ✓ SetConfig re-applies defaults correctly")
 	return nil
 }
 
@@ -438,6 +629,37 @@ func testMonitoring(_ context.Context, a, _ *gormdb.DBClient) error {
 	assertEq("monitoring still off", false, a.GetMonitoringEnabled())
 
 	fmt.Println("        ✓ monitoring enabled/disabled without deadlock")
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// Reconnect with monitoring: enable monitoring,
+// then reconnect. Monitoring should survive the
+// reconnect cycle (Close stops it, Connect
+// restarts it).
+// ──────────────────────────────────────────────
+
+func testReconnectWithMonitoring(ctx context.Context, a, _ *gormdb.DBClient) error {
+	a.SetMonitoringLogInterval(2 * time.Second)
+	a.SetMonitoringEnabled(true)
+	assertEq("monitoring on before reconnect", true, a.GetMonitoringEnabled())
+
+	if err := a.Reconnect(ctx); err != nil {
+		return fmt.Errorf("reconnect with monitoring: %w", err)
+	}
+
+	// After Reconnect, monitoring should still be enabled.
+	assertEq("monitoring on after reconnect", true, a.GetMonitoringEnabled())
+
+	// Verify the reconnected DB is functional.
+	var count int64
+	if err := a.GetDB().Unscoped().Model(&Product{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("count after reconnect with monitoring: %w", err)
+	}
+	fmt.Printf("        ✓ reconnect with monitoring OK, row count: %d\n", count)
+
+	// Clean up.
+	a.SetMonitoringEnabled(false)
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/cyrus-wg/gobox/pkg/logger"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/dbresolver"
 
 	"gorm.io/driver/mysql"
@@ -38,7 +39,7 @@ func (dbc *DBClient) GetConfig() Config {
 
 func (dbc *DBClient) SetConfig(config Config) {
 	dbc.mu.Lock()
-	dbc.dbConfig = config
+	dbc.dbConfig = applyDefaults(config)
 	dbc.mu.Unlock()
 }
 
@@ -120,17 +121,12 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 		logger.Warnw(ctx, "Context is nil, using context.Background() in database Connect", "clientName", dbc.GetClientName())
 	}
 
-	config := applyDefaults(dbc.GetConfig())
-	dbc.SetConfig(config)
+	// Ensure defaults are applied and take a lock-safe local snapshot.
+	dbc.SetConfig(dbc.GetConfig())
+	config := dbc.GetConfig()
 
 	if config.DSN == "" {
 		return errors.New("gormdb: DSN is required")
-	}
-
-	// Build the GORM config.
-	gormCfg := config.GormConfig
-	if gormCfg == nil {
-		gormCfg = &gorm.Config{}
 	}
 
 	// Open the primary (writer) connection.
@@ -142,7 +138,7 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 
 	logger.Infow(ctx, "Connecting to database", "driver", config.Driver, "clientName", dbc.GetClientName())
 
-	database, err := gorm.Open(dialector, gormCfg)
+	database, err := gorm.Open(dialector, config.GormConfig)
 	if err != nil {
 		logger.Errorw(ctx, "Failed to open database connection", "error", err, "driver", config.Driver, "clientName", dbc.GetClientName())
 		return fmt.Errorf("gormdb: failed to open database: %w", err)
@@ -178,17 +174,16 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 	}
 
 	// Start monitoring connection state if enabled.
-	if dbc.GetMonitoringEnabled() {
-		dbc.mu.Lock()
+	dbc.mu.Lock()
+	if dbc.monitoringEnabled {
 		if dbc.stopMonitor != nil {
 			dbc.stopMonitor()
 		}
 		monitorCtx, cancel := context.WithCancel(context.Background())
 		dbc.stopMonitor = cancel
-		dbc.mu.Unlock()
-
 		go dbc.monitorConnectionState(monitorCtx)
 	}
+	dbc.mu.Unlock()
 
 	logger.Infow(ctx, "Database connection established successfully", "clientName", dbc.GetClientName())
 	return nil
@@ -281,10 +276,10 @@ func (dbc *DBClient) registerReplicas() error {
 		Replicas: replicas,
 		Policy:   dbresolver.RandomPolicy{},
 	}).
-		SetMaxOpenConns(config.MaxOpenConns).
-		SetMaxIdleConns(config.MaxIdleConns).
-		SetConnMaxIdleTime(config.ConnMaxIdleTime).
-		SetConnMaxLifetime(config.ConnMaxLifetime)
+		SetMaxOpenConns(config.Replica.MaxOpenConns).
+		SetMaxIdleConns(config.Replica.MaxIdleConns).
+		SetConnMaxIdleTime(config.Replica.ConnMaxIdleTime).
+		SetConnMaxLifetime(config.Replica.ConnMaxLifetime)
 
 	return dbc.GetDB().Use(resolver)
 }
@@ -350,6 +345,32 @@ func applyDefaults(config Config) Config {
 		}
 		if config.Replica.ConnMaxLifetime <= 0 {
 			config.Replica.ConnMaxLifetime = 30 * time.Minute
+		}
+	}
+
+	// Logger defaults.
+	if config.SlowQueryThreshold == 0 {
+		config.SlowQueryThreshold = 200 * time.Millisecond
+	}
+	if config.IgnoreRecordNotFoundError == nil {
+		t := true
+		config.IgnoreRecordNotFoundError = &t
+	}
+	if config.GormLogLevel == 0 {
+		config.GormLogLevel = gormlogger.Warn
+	}
+
+	// Ensure GormConfig is initialized.
+	if config.GormConfig == nil {
+		config.GormConfig = &gorm.Config{}
+	}
+
+	// Use the structured JSON logger when no custom logger has been set.
+	if config.GormConfig.Logger == nil {
+		config.GormConfig.Logger = &GormLogger{
+			SlowThreshold:             config.SlowQueryThreshold,
+			IgnoreRecordNotFoundError: *config.IgnoreRecordNotFoundError,
+			LogLevel:                  config.GormLogLevel,
 		}
 	}
 

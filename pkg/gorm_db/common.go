@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // Driver identifies the database engine.
@@ -21,7 +22,7 @@ const (
 // that operate on a default global instance.
 type DBClient struct {
 	db         *gorm.DB
-	mu         sync.RWMutex // protects db, clientName, dbConfig
+	mu         sync.RWMutex // protects all fields below
 	clientName string
 	dbConfig   Config
 
@@ -41,7 +42,7 @@ type DBClient struct {
 func NewDBClient(name string, config Config) *DBClient {
 	return &DBClient{
 		clientName: name,
-		dbConfig:   config,
+		dbConfig:   applyDefaults(config),
 	}
 }
 
@@ -63,6 +64,20 @@ type Config struct {
 
 	// Replica holds optional read-replica DSNs and their own pool settings.
 	Replica ReplicaConfig
+
+	// SlowQueryThreshold is the duration after which a SQL query is logged
+	// at WARN level as a "slow query". Default: 200 ms.
+	// Zero means use the default; set a very large value to effectively disable.
+	SlowQueryThreshold time.Duration
+
+	// IgnoreRecordNotFoundError controls whether gorm.ErrRecordNotFound
+	// errors are silenced in the GORM logger Trace output. Default: true.
+	IgnoreRecordNotFoundError *bool
+
+	// GormLogLevel controls the verbosity of the built-in GORM logger.
+	// Uses gormlogger.Silent / Error / Warn / Info constants.
+	// Default: gormlogger.Warn (logs errors and slow queries).
+	GormLogLevel gormlogger.LogLevel
 
 	// GormConfig is forwarded to gorm.Open. If nil, a default &gorm.Config{}
 	// is used.
