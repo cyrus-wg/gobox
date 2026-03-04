@@ -120,6 +120,9 @@ func runAllTests(ctx context.Context, driver gormdb.Driver, dsn string) error {
 		{"applyDefaults preserves custom values", testApplyDefaultsCustomValues},
 		{"Custom GormConfig preserved", testCustomGormConfig},
 		{"NewGormLogger & LogMode", testGormLoggerAPI},
+		{"GormLogger slow query log", testGormLoggerSlowQuery},
+		{"GormLogger error log", testGormLoggerErrorLog},
+		{"GormLogger Info/Warn/Error methods", testGormLoggerDirectMethods},
 		{"SetConfig re-applies defaults", testSetConfigDefaults},
 		{"CRUD", testCRUD},
 		{"Transaction commit (two-client)", testTxCommitTwoClients},
@@ -354,6 +357,98 @@ func testGormLoggerAPI(_ context.Context, _, _ *gormdb.DBClient) error {
 	assertEq("LogMode level", gormlogger.Silent, silentGL.LogLevel)
 
 	fmt.Println("        ✓ NewGormLogger / LogMode work correctly")
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// GormLogger slow query log: create a client with
+// an extremely low SlowQueryThreshold (1 ns) so
+// any real SQL execution triggers the slow-query
+// WARN log.  Check the console for a structured
+// JSON line containing "gorm slow query".
+// ──────────────────────────────────────────────
+
+func testGormLoggerSlowQuery(ctx context.Context, a, _ *gormdb.DBClient) error {
+	driver := a.GetConfig().Driver
+	dsn := a.GetConfig().DSN
+
+	// 1 ns threshold — every query will exceed this.
+	tmp := gormdb.NewDBClient("slow-q-test", gormdb.Config{
+		Driver:             driver,
+		DSN:                dsn,
+		SlowQueryThreshold: 1 * time.Nanosecond,
+		GormLogLevel:       gormlogger.Warn,
+	})
+	if err := tmp.Connect(ctx); err != nil {
+		return fmt.Errorf("connect slow-q-test: %w", err)
+	}
+	defer tmp.Close()
+
+	// Run a simple query — it will certainly take >1 ns.
+	var count int64
+	if err := tmp.GetDB().Model(&Product{}).Count(&count).Error; err != nil {
+		return fmt.Errorf("count query: %w", err)
+	}
+
+	fmt.Println("        ✓ slow-query log emitted (check JSON output above for 'gorm slow query')")
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// GormLogger error log: run a query against a
+// non-existent table so GORM returns a real SQL
+// error.  The custom logger should emit a
+// structured JSON ERROR line containing
+// "gorm query error".
+// ──────────────────────────────────────────────
+
+func testGormLoggerErrorLog(ctx context.Context, a, _ *gormdb.DBClient) error {
+	driver := a.GetConfig().Driver
+	dsn := a.GetConfig().DSN
+
+	ignFalse := false
+	tmp := gormdb.NewDBClient("err-log-test", gormdb.Config{
+		Driver:                    driver,
+		DSN:                       dsn,
+		GormLogLevel:              gormlogger.Error,
+		IgnoreRecordNotFoundError: &ignFalse,
+	})
+	if err := tmp.Connect(ctx); err != nil {
+		return fmt.Errorf("connect err-log-test: %w", err)
+	}
+	defer tmp.Close()
+
+	// Query a table that does not exist → triggers a real SQL error.
+	type Ghost struct{ ID uint }
+	var ghost []Ghost
+	err := tmp.GetDB().Table("table_that_does_not_exist_xyz").Find(&ghost).Error
+	if err == nil {
+		return fmt.Errorf("expected SQL error for non-existent table, got nil")
+	}
+	fmt.Printf("        ✓ error log emitted for SQL error: %s\n", err)
+	fmt.Println("          (check JSON output above for 'gorm query error')")
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// GormLogger Info/Warn/Error direct methods:
+// call the logger's convenience wrappers
+// directly to verify they pass through to the
+// structured logger.
+// ──────────────────────────────────────────────
+
+func testGormLoggerDirectMethods(_ context.Context, _, _ *gormdb.DBClient) error {
+	lg := gormdb.NewGormLogger()
+
+	// Set LogLevel to Info so all three methods are active.
+	verbose := lg.LogMode(gormlogger.Info).(*gormdb.GormLogger)
+
+	ctx := context.Background()
+	verbose.Info(ctx, "test info message from GormLogger: %s", "hello")
+	verbose.Warn(ctx, "test warn message from GormLogger: %s", "caution")
+	verbose.Error(ctx, "test error message from GormLogger: %s", "oops")
+
+	fmt.Println("        ✓ Info/Warn/Error methods emitted structured logs (check JSON output above)")
 	return nil
 }
 
