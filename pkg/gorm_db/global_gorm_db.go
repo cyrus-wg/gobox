@@ -3,6 +3,7 @@ package gormdb
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -37,6 +38,22 @@ func GetClientName() string {
 
 func SetClientName(name string) {
 	defaultDBClient.SetClientName(name)
+}
+
+func GetMonitoringEnabled() bool {
+	return defaultDBClient.GetMonitoringEnabled()
+}
+
+func SetMonitoringEnabled(enabled bool) {
+	defaultDBClient.SetMonitoringEnabled(enabled)
+}
+
+func GetMonitoringLogInterval() time.Duration {
+	return defaultDBClient.GetMonitoringLogInterval()
+}
+
+func SetMonitoringLogInterval(interval time.Duration) {
+	defaultDBClient.SetMonitoringLogInterval(interval)
 }
 
 func Connect(ctx context.Context) error {

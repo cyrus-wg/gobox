@@ -25,7 +25,9 @@ type DBClient struct {
 	clientName string
 	dbConfig   Config
 
-	monitorDone chan struct{} // closed to stop the monitoring goroutine
+	monitoringEnabled     bool
+	monitoringLogInterval time.Duration
+	stopMonitor           func() // cancels the monitoring goroutine's context; nil when not running
 }
 
 // NewDBClient creates a new DBClient with the given name and config.
@@ -65,11 +67,6 @@ type Config struct {
 	// GormConfig is forwarded to gorm.Open. If nil, a default &gorm.Config{}
 	// is used.
 	GormConfig *gorm.Config
-
-	// MonitoringEnabled starts a background goroutine that periodically logs
-	// connection-pool statistics. Stopped automatically on Close.
-	MonitoringEnabled     bool
-	MonitoringLogInterval time.Duration
 }
 
 // ReplicaConfig holds DSNs and pool settings for read replicas.

@@ -50,8 +50,67 @@ func (dbc *DBClient) GetClientName() string {
 
 func (dbc *DBClient) SetClientName(name string) {
 	dbc.mu.Lock()
-	logger.Infow(context.Background(), "Setting database client name", "oldName", dbc.clientName, "newName", name)
+	oldName := dbc.clientName
 	dbc.clientName = name
+	dbc.mu.Unlock()
+
+	logger.Infow(context.Background(), "Setting database client name", "oldName", oldName, "newName", name)
+}
+
+func (dbc *DBClient) GetMonitoringEnabled() bool {
+	dbc.mu.RLock()
+	defer dbc.mu.RUnlock()
+	return dbc.monitoringEnabled
+}
+
+func (dbc *DBClient) SetMonitoringEnabled(enabled bool) {
+	dbc.mu.Lock()
+	if dbc.monitoringEnabled == enabled {
+		dbc.mu.Unlock()
+		return
+	}
+
+	dbc.monitoringEnabled = enabled
+
+	// Stop any existing monitor goroutine.
+	if dbc.stopMonitor != nil {
+		dbc.stopMonitor()
+		dbc.stopMonitor = nil
+	}
+
+	if enabled {
+		if dbc.monitoringLogInterval <= 0 {
+			dbc.monitoringLogInterval = 30 * time.Second
+		}
+
+		monitorCtx, cancel := context.WithCancel(context.Background())
+		dbc.stopMonitor = cancel
+		clientName := dbc.clientName
+		dbc.mu.Unlock()
+
+		go dbc.monitorConnectionState(monitorCtx)
+		logger.Infow(context.Background(), "Database connection monitoring enabled", "clientName", clientName)
+	} else {
+		clientName := dbc.clientName
+		dbc.mu.Unlock()
+
+		logger.Infow(context.Background(), "Database connection monitoring disabled", "clientName", clientName)
+	}
+}
+
+func (dbc *DBClient) GetMonitoringLogInterval() time.Duration {
+	dbc.mu.RLock()
+	defer dbc.mu.RUnlock()
+	return dbc.monitoringLogInterval
+}
+
+func (dbc *DBClient) SetMonitoringLogInterval(interval time.Duration) {
+	if interval <= time.Second {
+		logger.Warnw(context.Background(), "Monitoring log interval must be greater than 1 second", "providedInterval", interval, "clientName", dbc.GetClientName())
+		return
+	}
+	dbc.mu.Lock()
+	dbc.monitoringLogInterval = interval
 	dbc.mu.Unlock()
 }
 
@@ -118,6 +177,19 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("gormdb: ping failed: %w", err)
 	}
 
+	// Start monitoring connection state if enabled.
+	if dbc.GetMonitoringEnabled() {
+		dbc.mu.Lock()
+		if dbc.stopMonitor != nil {
+			dbc.stopMonitor()
+		}
+		monitorCtx, cancel := context.WithCancel(context.Background())
+		dbc.stopMonitor = cancel
+		dbc.mu.Unlock()
+
+		go dbc.monitorConnectionState(monitorCtx)
+	}
+
 	logger.Infow(ctx, "Database connection established successfully", "clientName", dbc.GetClientName())
 	return nil
 }
@@ -136,6 +208,10 @@ func (dbc *DBClient) Close() error {
 	dbc.mu.Lock()
 	database := dbc.db
 	dbc.db = nil
+	if dbc.stopMonitor != nil {
+		dbc.stopMonitor()
+		dbc.stopMonitor = nil
+	}
 	dbc.mu.Unlock()
 
 	if database == nil {
@@ -210,38 +286,41 @@ func (dbc *DBClient) registerReplicas() error {
 		SetConnMaxIdleTime(config.ConnMaxIdleTime).
 		SetConnMaxLifetime(config.ConnMaxLifetime)
 
-	return dbc.db.Use(resolver)
+	return dbc.GetDB().Use(resolver)
 }
 
-func (dbc *DBClient) monitorConnectionState() {
-	ctx := context.Background()
-	ticker := time.NewTicker(dbc.GetConfig().MonitoringLogInterval)
+func (dbc *DBClient) monitorConnectionState(ctx context.Context) {
+	ticker := time.NewTicker(dbc.GetMonitoringLogInterval())
 	defer ticker.Stop()
 
-	for range ticker.C {
-		db := dbc.GetDB()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			db := dbc.GetDB()
+			if db == nil {
+				logger.Warnw(ctx, "Database client is nil during connection monitoring", "clientName", dbc.GetClientName())
+				continue
+			}
 
-		if db == nil {
-			logger.Warnw(ctx, "Database client is nil during connection monitoring", "clientName", dbc.GetClientName())
-			continue
+			sqlDB, err := db.DB()
+			if err != nil {
+				logger.Warnw(ctx, "Failed to obtain *sql.DB for health check", "error", err, "clientName", dbc.GetClientName())
+				continue
+			}
+
+			stats := sqlDB.Stats()
+			logger.Infow(ctx, "Database connection pool stats",
+				"clientName", dbc.GetClientName(),
+				"maxOpenConns", stats.MaxOpenConnections,
+				"openConns", stats.OpenConnections,
+				"inUse", stats.InUse,
+				"idle", stats.Idle,
+				"waitCount", stats.WaitCount,
+				"waitDurationInSeconds", stats.WaitDuration.Seconds(),
+			)
 		}
-
-		sqlDB, err := db.DB()
-		if err != nil {
-			logger.Warnw(ctx, "Failed to obtain *sql.DB for health check", "error", err, "clientName", dbc.GetClientName())
-			continue
-		}
-
-		stats := sqlDB.Stats()
-		logger.Infow(ctx, "Database connection pool stats",
-			"clientName", dbc.GetClientName(),
-			"maxOpenConns", stats.MaxOpenConnections,
-			"openConns", stats.OpenConnections,
-			"inUse", stats.InUse,
-			"idle", stats.Idle,
-			"waitCount", stats.WaitCount,
-			"waitDurationInSeconds", stats.WaitDuration.Seconds(),
-		)
 	}
 }
 
@@ -272,10 +351,6 @@ func applyDefaults(config Config) Config {
 		if config.Replica.ConnMaxLifetime <= 0 {
 			config.Replica.ConnMaxLifetime = 30 * time.Minute
 		}
-	}
-
-	if config.MonitoringEnabled && config.MonitoringLogInterval < 10*time.Second {
-		config.MonitoringLogInterval = 30 * time.Second
 	}
 
 	return config
