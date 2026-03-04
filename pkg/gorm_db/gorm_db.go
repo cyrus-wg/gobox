@@ -107,7 +107,7 @@ func (dbc *DBClient) GetMonitoringLogInterval() time.Duration {
 
 func (dbc *DBClient) SetMonitoringLogInterval(interval time.Duration) {
 	if interval <= time.Second {
-		logger.Warnw(context.Background(), "Monitoring log interval must be greater than 1 second", "providedInterval", interval, "clientName", dbc.GetClientName())
+		logger.Warnw(context.Background(), "Monitoring log interval must be greater than 1 second", "providedInterval", interval, "clientName", dbc.clientName)
 		return
 	}
 	dbc.mu.Lock()
@@ -118,7 +118,7 @@ func (dbc *DBClient) SetMonitoringLogInterval(interval time.Duration) {
 func (dbc *DBClient) Connect(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
-		logger.Warnw(ctx, "Context is nil, using context.Background() in database Connect", "clientName", dbc.GetClientName())
+		logger.Warnw(ctx, "Context is nil, using context.Background() in database Connect", "clientName", dbc.clientName)
 	}
 
 	// Ensure defaults are applied and take a lock-safe local snapshot.
@@ -132,15 +132,15 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 	// Open the primary (writer) connection.
 	dialector, err := newDialector(config.Driver, config.DSN)
 	if err != nil {
-		logger.Errorw(ctx, "Failed to create GORM dialector", "error", err, "driver", config.Driver, "clientName", dbc.GetClientName())
+		logger.Errorw(ctx, "Failed to create GORM dialector", "error", err, "driver", config.Driver, "clientName", dbc.clientName)
 		return fmt.Errorf("gormdb: failed to create dialector: %w", err)
 	}
 
-	logger.Infow(ctx, "Connecting to database", "driver", config.Driver, "clientName", dbc.GetClientName())
+	logger.Infow(ctx, "Connecting to database", "driver", config.Driver, "clientName", dbc.clientName)
 
 	database, err := gorm.Open(dialector, config.GormConfig)
 	if err != nil {
-		logger.Errorw(ctx, "Failed to open database connection", "error", err, "driver", config.Driver, "clientName", dbc.GetClientName())
+		logger.Errorw(ctx, "Failed to open database connection", "error", err, "driver", config.Driver, "clientName", dbc.clientName)
 		return fmt.Errorf("gormdb: failed to open database: %w", err)
 	}
 
@@ -148,28 +148,28 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 
 	// Configure the underlying sql.DB connection pool.
 	if err := dbc.configureSQLDB(); err != nil {
-		logger.Errorw(ctx, "Failed to configure SQL DB connection pool", "error", err, "clientName", dbc.GetClientName())
+		logger.Errorw(ctx, "Failed to configure SQL DB connection pool", "error", err, "clientName", dbc.clientName)
 		return fmt.Errorf("gormdb: failed to configure SQL DB: %w", err)
 	}
 
 	// Register read replicas via dbresolver if any are provided.
 	if len(config.Replica.DSN) > 0 {
 		if err := dbc.registerReplicas(); err != nil {
-			logger.Errorw(ctx, "Failed to register read replicas", "error", err, "clientName", dbc.GetClientName())
+			logger.Errorw(ctx, "Failed to register read replicas", "error", err, "clientName", dbc.clientName)
 			return fmt.Errorf("gormdb: failed to register replicas: %w", err)
 		}
-		logger.Infow(ctx, "Read replicas registered successfully", "replicaCount", len(config.Replica.DSN), "clientName", dbc.GetClientName())
+		logger.Infow(ctx, "Read replicas registered successfully", "replicaCount", len(config.Replica.DSN), "clientName", dbc.clientName)
 	}
 
 	// Verify connectivity.
 	sqlDB, err := dbc.GetDB().DB()
 	if err != nil {
-		logger.Errorw(ctx, "Failed to obtain *sql.DB for connectivity check", "error", err, "clientName", dbc.GetClientName())
+		logger.Errorw(ctx, "Failed to obtain *sql.DB for connectivity check", "error", err, "clientName", dbc.clientName)
 		return fmt.Errorf("gormdb: cannot obtain *sql.DB: %w", err)
 	}
 	if err := sqlDB.PingContext(ctx); err != nil {
 		dbc.Close() // close the pool if ping fails
-		logger.Errorw(ctx, "Database PING failed", "error", err, "clientName", dbc.GetClientName())
+		logger.Errorw(ctx, "Database PING failed", "error", err, "clientName", dbc.clientName)
 		return fmt.Errorf("gormdb: ping failed: %w", err)
 	}
 
@@ -185,14 +185,14 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 	}
 	dbc.mu.Unlock()
 
-	logger.Infow(ctx, "Database connection established successfully", "clientName", dbc.GetClientName())
+	logger.Infow(ctx, "Database connection established successfully", "clientName", dbc.clientName)
 	return nil
 }
 
 func (dbc *DBClient) Reconnect(ctx context.Context) error {
-	logger.Infow(ctx, "Reconnecting to database", "clientName", dbc.GetClientName())
+	logger.Infow(ctx, "Reconnecting to database", "clientName", dbc.clientName)
 	if err := dbc.Close(); err != nil {
-		logger.Errorw(ctx, "Failed to close existing database connection during reconnect", "error", err, "clientName", dbc.GetClientName())
+		logger.Errorw(ctx, "Failed to close existing database connection during reconnect", "error", err, "clientName", dbc.clientName)
 		// Continue with reconnect attempt even if close fails, as the existing connection may be in a bad state.
 	}
 
@@ -295,19 +295,19 @@ func (dbc *DBClient) monitorConnectionState(ctx context.Context) {
 		case <-ticker.C:
 			db := dbc.GetDB()
 			if db == nil {
-				logger.Warnw(ctx, "Database client is nil during connection monitoring", "clientName", dbc.GetClientName())
+				logger.Warnw(ctx, "Database client is nil during connection monitoring", "clientName", dbc.clientName)
 				continue
 			}
 
 			sqlDB, err := db.DB()
 			if err != nil {
-				logger.Warnw(ctx, "Failed to obtain *sql.DB for health check", "error", err, "clientName", dbc.GetClientName())
+				logger.Warnw(ctx, "Failed to obtain *sql.DB for health check", "error", err, "clientName", dbc.clientName)
 				continue
 			}
 
 			stats := sqlDB.Stats()
 			logger.Infow(ctx, "Database connection pool stats",
-				"clientName", dbc.GetClientName(),
+				"clientName", dbc.clientName,
 				"maxOpenConns", stats.MaxOpenConnections,
 				"openConns", stats.OpenConnections,
 				"inUse", stats.InUse,

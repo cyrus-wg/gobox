@@ -62,7 +62,7 @@ func (rc *RedisClient) SetClientName(name string) {
 func (rc *RedisClient) Connect(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
-		logger.Warnw(ctx, "Context is nil, using context.Background() in Redis Connect", "clientName", rc.GetClientName())
+		logger.Warnw(ctx, "Context is nil, using context.Background() in Redis Connect", "clientName", rc.clientName)
 	}
 
 	config := applyDefaults(rc.GetConfig())
@@ -81,7 +81,7 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 		return errors.New("redisdb: MaxIdleConns must be ≤ PoolSize")
 	}
 
-	logger.Infow(ctx, "Connecting to Redis", "clientName", rc.GetClientName())
+	logger.Infow(ctx, "Connecting to Redis", "clientName", rc.clientName)
 
 	options := &redis.UniversalOptions{
 		Addrs:    config.Addrs,
@@ -108,7 +108,7 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 	// Sentinel mode: requires MasterName
 	if config.MasterName != "" {
 		options.MasterName = config.MasterName
-		logger.Infow(ctx, "Using Redis Sentinel", "masterName", config.MasterName, "clientName", rc.GetClientName())
+		logger.Infow(ctx, "Using Redis Sentinel", "masterName", config.MasterName, "clientName", rc.clientName)
 	}
 
 	// DB selection is only supported for standalone and Sentinel modes.
@@ -116,16 +116,16 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 	isClusterMode := len(config.Addrs) > 1 && config.MasterName == ""
 	if !isClusterMode {
 		options.DB = config.DB
-		logger.Infow(ctx, "Using Redis DB", "db", config.DB, "clientName", rc.GetClientName())
+		logger.Infow(ctx, "Using Redis DB", "db", config.DB, "clientName", rc.clientName)
 	} else {
-		logger.Infow(ctx, "Using Redis Cluster mode (DB selection not supported, using DB 0)", "clientName", rc.GetClientName())
+		logger.Infow(ctx, "Using Redis Cluster mode (DB selection not supported, using DB 0)", "clientName", rc.clientName)
 	}
 
 	if config.TLSEnabled {
 		options.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
-		logger.Infow(ctx, "TLS is enabled for Redis connection", "clientName", rc.GetClientName())
+		logger.Infow(ctx, "TLS is enabled for Redis connection", "clientName", rc.clientName)
 	}
 
 	rc.SetClient(redis.NewUniversalClient(options))
@@ -134,20 +134,20 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 	// Use GetClient() to go through the mutex, not rc.client directly.
 	if err := rc.GetClient().Ping(ctx).Err(); err != nil {
 		rc.Close() // close client if ping fails
-		logger.Errorw(ctx, "Failed to connect to Redis", "error", err, "clientName", rc.GetClientName())
+		logger.Errorw(ctx, "Failed to connect to Redis", "error", err, "clientName", rc.clientName)
 		return err
 	}
 
-	logger.Infow(ctx, "Redis connection established successfully", "clientName", rc.GetClientName())
+	logger.Infow(ctx, "Redis connection established successfully", "clientName", rc.clientName)
 	return nil
 }
 
 // Reconnect closes the existing connection and re-establishes it using the
 // stored config. Use this after a topology change or config update.
 func (rc *RedisClient) Reconnect(ctx context.Context) error {
-	logger.Infow(ctx, "Reconnecting to Redis", "clientName", rc.GetClientName())
+	logger.Infow(ctx, "Reconnecting to Redis", "clientName", rc.clientName)
 	if err := rc.Close(); err != nil {
-		logger.Errorw(ctx, "Error closing existing Redis client during reconnect", "error", err, "clientName", rc.GetClientName())
+		logger.Errorw(ctx, "Error closing existing Redis client during reconnect", "error", err, "clientName", rc.clientName)
 		// Continue with reconnect attempt even if close fails, as the old client may be in a bad state.
 	}
 
