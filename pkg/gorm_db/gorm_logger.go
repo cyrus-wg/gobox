@@ -86,7 +86,7 @@ func (l *GormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 		(!errors.Is(err, gormlogger.ErrRecordNotFound) || !l.IgnoreRecordNotFoundError):
 
 		sql, rows := fc()
-		logger.Errorw(ctx, err.Error(),
+		logger.Errorw(ctx, "gorm query error",
 			"lib", "gorm",
 			"error", err.Error(),
 			"elapsedMs", elapsedMs,
