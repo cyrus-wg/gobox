@@ -46,7 +46,7 @@ func main() {
 	status, body, err = httpclient.SendRequest(ctx, "GET", srv.URL+"/test", nil, map[string]string{
 		"X-Custom": "value",
 	})
-	fmt.Printf("  status=%d err=%v\n", status, err)
+	fmt.Printf("  status=%d err=%v body=%s\n", status, err, strings.TrimSpace(string(body)))
 	fmt.Println()
 
 	// --- Instance client ---
