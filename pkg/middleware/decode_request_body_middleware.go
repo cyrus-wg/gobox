@@ -96,7 +96,7 @@ func DecodeRequestBodyMiddleware[T any](logRequestBody ...bool) func(next http.H
 
 const requestBodyContextKey contextKey = "requestBody"
 
-func GetRequestBodyFromContext[T any](r *http.Request) (*T, bool) {
-	body, ok := r.Context().Value(requestBodyContextKey).(*T)
+func GetRequestBodyFromContext[T any](ctx context.Context) (*T, bool) {
+	body, ok := ctx.Value(requestBodyContextKey).(*T)
 	return body, ok
 }

@@ -45,7 +45,7 @@ func TestDecodeRequestBodyMiddleware_ValidJSON(t *testing.T) {
 	var captured *testPayload
 	handler := DecodeRequestBodyMiddleware[testPayload]()(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p, ok := GetRequestBodyFromContext[testPayload](r)
+			p, ok := GetRequestBodyFromContext[testPayload](r.Context())
 			if !ok {
 				t.Fatal("request body not in context")
 			}
@@ -124,7 +124,7 @@ func TestDecodeRequestBodyMiddleware_LogRequestBodyFalse(t *testing.T) {
 
 func TestGetRequestBodyFromContext_Missing(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
-	_, ok := GetRequestBodyFromContext[testPayload](req)
+	_, ok := GetRequestBodyFromContext[testPayload](req.Context())
 	if ok {
 		t.Fatal("expected false when body not in context")
 	}
@@ -451,7 +451,7 @@ func TestMiddlewareChaining(t *testing.T) {
 		RequestMiddleware(false, false)(
 			DecodeRequestBodyMiddleware[testPayload]()(
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					p, ok := GetRequestBodyFromContext[testPayload](r)
+					p, ok := GetRequestBodyFromContext[testPayload](r.Context())
 					if !ok {
 						w.WriteHeader(500)
 						return
