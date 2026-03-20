@@ -56,11 +56,12 @@ type Config struct {
 	//   - Single address                  → standalone mode
 	//   - Multiple addresses + MasterName → Sentinel mode
 	//   - Multiple addresses (no master)  → Cluster mode
-	Addrs      []string
-	Password   string
-	DB         int    // ignored in Cluster mode
-	MasterName string // non-empty enables Sentinel mode
-	TLSEnabled bool
+	Addrs            []string
+	Password         string
+	SentinelPassword string // optional password for Sentinel auth (if MasterName is set)
+	DB               int    // ignored in Cluster mode
+	MasterName       string // non-empty enables Sentinel mode
+	TLSEnabled       bool
 
 	// DialTimeout is the max time to establish a TCP connection (including TLS).
 	// Set to -1 to disable. Default: 5s.

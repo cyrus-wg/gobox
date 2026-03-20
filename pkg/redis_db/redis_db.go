@@ -108,6 +108,7 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 	// Sentinel mode: requires MasterName
 	if config.MasterName != "" {
 		options.MasterName = config.MasterName
+		options.SentinelPassword = config.SentinelPassword
 		logger.Infow(ctx, "Using Redis Sentinel", "masterName", config.MasterName, "clientName", rc.clientName)
 	}
 
