@@ -81,6 +81,10 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 		return errors.New("redisdb: MaxIdleConns must be ≤ PoolSize")
 	}
 
+	// Route go-redis internal log output (e.g. Sentinel discovery, failover
+	// events) through the project's structured JSON logger.
+	redis.SetLogger(NewRedisLogger())
+
 	logger.Infow(ctx, "Connecting to Redis", "clientName", rc.clientName)
 
 	options := &redis.UniversalOptions{
