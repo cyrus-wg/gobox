@@ -89,7 +89,9 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 
 	options := &redis.UniversalOptions{
 		Addrs:    config.Addrs,
+		Username: config.Username,
 		Password: config.Password,
+		DB:       config.DB, // only used for standalone and Sentinel modes; ignored in Cluster mode
 
 		// Timeouts — -1 passes through to go-redis as "no deadline"
 		DialTimeout:  config.DialTimeout,
@@ -107,23 +109,41 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 		MaxRetries:      config.MaxRetries,
 		MinRetryBackoff: config.MinRetryBackoff,
 		MaxRetryBackoff: config.MaxRetryBackoff,
+
+		// Sentinel options (only used if MasterName is set)
+		MasterName:       config.MasterName,
+		SentinelUsername: config.SentinelUsername,
+		SentinelPassword: config.SentinelPassword,
 	}
 
 	// Sentinel mode: requires MasterName
 	if config.MasterName != "" {
-		options.MasterName = config.MasterName
-		options.SentinelPassword = config.SentinelPassword
 		logger.Infow(ctx, "Using Redis Sentinel", "masterName", config.MasterName, "clientName", rc.clientName)
 	}
 
-	// DB selection is only supported for standalone and Sentinel modes.
-	// Cluster mode is auto-detected: multiple addresses with no MasterName.
+	// Cluster mode: multiple Addrs + no MasterName
 	isClusterMode := len(config.Addrs) > 1 && config.MasterName == ""
-	if !isClusterMode {
-		options.DB = config.DB
-		logger.Infow(ctx, "Using Redis DB", "db", config.DB, "clientName", rc.clientName)
-	} else {
-		logger.Infow(ctx, "Using Redis Cluster mode (DB selection not supported, using DB 0)", "clientName", rc.clientName)
+	if isClusterMode {
+		logger.Infow(ctx, "Using Redis Cluster mode", "clientName", rc.clientName)
+	}
+
+	// ReadRouting is only supported for Sentinel and Cluster modes.
+	if isClusterMode || config.MasterName != "" {
+		switch config.ReadRouting {
+		case ReadFromMaster:
+			logger.Infow(ctx, "Configuring read routing to master", "clientName", rc.clientName)
+		case ReadFromReplica:
+			options.ReadOnly = true
+			logger.Infow(ctx, "Configuring read routing to replicas (read-only mode)", "clientName", rc.clientName)
+		case ReadByLatency:
+			options.RouteByLatency = true
+			logger.Infow(ctx, "Configuring read routing by latency", "clientName", rc.clientName)
+		case ReadRandomly:
+			options.RouteRandomly = true
+			logger.Infow(ctx, "Configuring read routing randomly between master and replicas", "clientName", rc.clientName)
+		default:
+			logger.Infow(ctx, "Using default read routing to master", "clientName", rc.clientName)
+		}
 	}
 
 	if config.TLSEnabled {

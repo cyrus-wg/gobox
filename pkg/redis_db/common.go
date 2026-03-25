@@ -7,6 +7,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+type ReadRouting string
+
+const (
+	ReadFromMaster  ReadRouting = "master"  // default
+	ReadFromReplica ReadRouting = "replica" // ReadOnly
+	ReadByLatency   ReadRouting = "latency" // RouteByLatency
+	ReadRandomly    ReadRouting = "random"  // RouteRandomly
+)
+
 // RedisClient wraps a redis.UniversalClient with connection management,
 // config storage, and thread-safe accessors. Use NewRedisClient to create
 // one, or use the package-level functions that operate on a default global.
@@ -57,7 +66,9 @@ type Config struct {
 	//   - Multiple addresses + MasterName → Sentinel mode
 	//   - Multiple addresses (no master)  → Cluster mode
 	Addrs            []string
+	Username         string // optional username for Redis auth (if enabled on server)
 	Password         string
+	SentinelUsername string // optional username for Sentinel auth (if MasterName is set)
 	SentinelPassword string // optional password for Sentinel auth (if MasterName is set)
 	DB               int    // ignored in Cluster mode
 	MasterName       string // non-empty enables Sentinel mode
@@ -119,4 +130,8 @@ type Config struct {
 	// Set to -1 to disable backoff cap.
 	// Default: 512ms.
 	MaxRetryBackoff time.Duration
+
+	// ReadRouting controls how read commands are routed in Sentinel and Cluster
+	// modes. Default: ReadFromMaster.
+	ReadRouting ReadRouting
 }
