@@ -95,3 +95,7 @@ func RunInTransaction(ctx context.Context, db *gorm.DB, fn func(tx *gorm.DB) err
 func ExecRawSQL(tx *gorm.DB, sql string, values ...any) *gorm.DB {
 	return defaultDBClient.ExecRawSQL(tx, sql, values...)
 }
+
+func Create(ctx context.Context, value any, tx ...*gorm.DB) error {
+	return defaultDBClient.Create(ctx, value, tx...)
+}
