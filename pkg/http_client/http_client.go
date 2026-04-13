@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"strings"
@@ -311,4 +312,122 @@ func (hc *HTTPClient) JSONOptions(ctx context.Context, url string, headers map[s
 
 func (hc *HTTPClient) JSONHead(ctx context.Context, url string, headers map[string]string) (int, []byte, error) {
 	return hc.SendRequest(ctx, http.MethodHead, url, nil, jsonHeaders(headers))
+}
+
+// ---------------------------------------------------------------------------
+// multipart/form-data support
+// ---------------------------------------------------------------------------
+
+// FormFile represents a file to include in a multipart/form-data request.
+type FormFile struct {
+	FieldName string    // form field name (e.g. "avatar")
+	FileName  string    // file name sent to the server (e.g. "photo.png")
+	Content   io.Reader // file content
+}
+
+// buildMultipartBody encodes fields and files into a multipart body and returns
+// the body reader along with the Content-Type header (which includes the
+// generated boundary).
+func buildMultipartBody(fields map[string]string, files []FormFile) (io.Reader, string, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			return nil, "", err
+		}
+	}
+
+	for _, f := range files {
+		part, err := writer.CreateFormFile(f.FieldName, f.FileName)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := io.Copy(part, f.Content); err != nil {
+			return nil, "", err
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, "", err
+	}
+
+	return &buf, writer.FormDataContentType(), nil
+}
+
+// formHeaders builds a multipart/form-data body from fields and files, and
+// returns the body reader along with a shallow copy of headers that includes
+// the correct Content-Type (with boundary). The original map is never mutated.
+func formHeaders(fields map[string]string, files []FormFile, headers map[string]string) (io.Reader, map[string]string, error) {
+	body, contentType, err := buildMultipartBody(fields, files)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	h := make(map[string]string, len(headers)+1)
+	maps.Copy(h, headers)
+	h["Content-Type"] = contentType
+
+	return body, h, nil
+}
+
+// doMultipartRequest is the single shared implementation for all Form*
+// methods. It builds the multipart body, merges headers, and delegates to
+// doRequest.
+func doMultipartRequest(ctx context.Context, client *http.Client, method, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	body, h, err := formHeaders(fields, files, headers)
+	if err != nil {
+		return 0, nil, err
+	}
+	return doRequest(ctx, client, method, url, body, h)
+}
+
+// SendFormRequest executes a multipart/form-data request using the
+// package-level default client. ctx controls cancellation and deadlines;
+// pass context.Background() when no deadline propagation is needed.
+func SendFormRequest(ctx context.Context, method, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return doMultipartRequest(ctx, getDefaultClient(), method, url, fields, files, headers)
+}
+
+// FormPost sends a multipart/form-data POST request using the package-level
+// default client. fields contains plain text form fields; files contains file
+// uploads. Either may be nil.
+func FormPost(ctx context.Context, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	return SendFormRequest(ctx, http.MethodPost, url, fields, files, headers)
+}
+
+// FormPut sends a multipart/form-data PUT request using the package-level
+// default client.
+func FormPut(ctx context.Context, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	return SendFormRequest(ctx, http.MethodPut, url, fields, files, headers)
+}
+
+// FormPatch sends a multipart/form-data PATCH request using the package-level
+// default client.
+func FormPatch(ctx context.Context, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	return SendFormRequest(ctx, http.MethodPatch, url, fields, files, headers)
+}
+
+// SendFormRequest executes a multipart/form-data request using this instance's
+// client.
+func (hc *HTTPClient) SendFormRequest(ctx context.Context, method, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return doMultipartRequest(ctx, hc.client, method, url, fields, files, headers)
+}
+
+func (hc *HTTPClient) FormPost(ctx context.Context, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	return hc.SendFormRequest(ctx, http.MethodPost, url, fields, files, headers)
+}
+
+func (hc *HTTPClient) FormPut(ctx context.Context, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	return hc.SendFormRequest(ctx, http.MethodPut, url, fields, files, headers)
+}
+
+func (hc *HTTPClient) FormPatch(ctx context.Context, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
+	return hc.SendFormRequest(ctx, http.MethodPatch, url, fields, files, headers)
 }

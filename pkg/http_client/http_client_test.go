@@ -587,3 +587,289 @@ func TestJsonHeaders_NilInput(t *testing.T) {
 		t.Fatal("Content-Type not set on nil input")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// multipart/form-data helpers
+// ---------------------------------------------------------------------------
+
+// multipartEchoServer returns a server that parses the multipart request and
+// echoes back the method, fields, and uploaded file metadata as JSON.
+func multipartEchoServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ct := r.Header.Get("Content-Type")
+
+		fields := map[string]string{}
+		files := []map[string]string{}
+
+		if strings.HasPrefix(ct, "multipart/form-data") {
+			if err := r.ParseMultipartForm(10 << 20); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			for k, vs := range r.MultipartForm.Value {
+				fields[k] = vs[0]
+			}
+			for k, fhs := range r.MultipartForm.File {
+				for _, fh := range fhs {
+					f, _ := fh.Open()
+					data, _ := io.ReadAll(f)
+					f.Close()
+					files = append(files, map[string]string{
+						"field":    k,
+						"filename": fh.Filename,
+						"content":  string(data),
+					})
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"method": r.Method,
+			"fields": fields,
+			"files":  files,
+		})
+	}))
+}
+
+func TestBuildMultipartBody_FieldsOnly(t *testing.T) {
+	body, ct, err := buildMultipartBody(map[string]string{"name": "alice", "age": "30"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(ct, "multipart/form-data; boundary=") {
+		t.Fatalf("unexpected Content-Type: %s", ct)
+	}
+	data, _ := io.ReadAll(body)
+	if !strings.Contains(string(data), "alice") {
+		t.Fatal("expected field value in body")
+	}
+}
+
+func TestBuildMultipartBody_FilesOnly(t *testing.T) {
+	files := []FormFile{
+		{FieldName: "doc", FileName: "readme.txt", Content: strings.NewReader("hello world")},
+	}
+	body, ct, err := buildMultipartBody(nil, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(ct, "multipart/form-data") {
+		t.Fatalf("unexpected Content-Type: %s", ct)
+	}
+	data, _ := io.ReadAll(body)
+	s := string(data)
+	if !strings.Contains(s, "hello world") {
+		t.Fatal("expected file content in body")
+	}
+	if !strings.Contains(s, "readme.txt") {
+		t.Fatal("expected filename in body")
+	}
+}
+
+func TestBuildMultipartBody_FieldsAndFiles(t *testing.T) {
+	files := []FormFile{
+		{FieldName: "avatar", FileName: "photo.png", Content: strings.NewReader("PNG-DATA")},
+	}
+	body, _, err := buildMultipartBody(map[string]string{"user": "bob"}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(body)
+	s := string(data)
+	if !strings.Contains(s, "bob") || !strings.Contains(s, "PNG-DATA") {
+		t.Fatal("expected both field and file data")
+	}
+}
+
+func TestFormPost(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	files := []FormFile{
+		{FieldName: "file", FileName: "test.txt", Content: strings.NewReader("file-content")},
+	}
+	status, body, err := FormPost(context.Background(), srv.URL, map[string]string{"key": "val"}, files, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["method"] != "POST" {
+		t.Fatalf("expected POST, got %v", resp["method"])
+	}
+	fields := resp["fields"].(map[string]any)
+	if fields["key"] != "val" {
+		t.Fatalf("expected field key=val, got %v", fields["key"])
+	}
+}
+
+func TestFormPost_NilContext(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	status, _, err := FormPost(nil, srv.URL, map[string]string{"a": "b"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+}
+
+func TestFormPut(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	status, body, err := FormPut(context.Background(), srv.URL, map[string]string{"x": "1"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	var resp map[string]any
+	json.Unmarshal(body, &resp)
+	if resp["method"] != "PUT" {
+		t.Fatalf("expected PUT, got %v", resp["method"])
+	}
+}
+
+func TestFormPatch(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	status, body, err := FormPatch(context.Background(), srv.URL, map[string]string{"y": "2"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	var resp map[string]any
+	json.Unmarshal(body, &resp)
+	if resp["method"] != "PATCH" {
+		t.Fatalf("expected PATCH, got %v", resp["method"])
+	}
+}
+
+func TestFormPost_PreservesExtraHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"x_custom":     r.Header.Get("X-Custom"),
+			"content_type": r.Header.Get("Content-Type"),
+		})
+	}))
+	defer srv.Close()
+
+	hdrs := map[string]string{"X-Custom": "keep-me"}
+	_, body, err := FormPost(context.Background(), srv.URL, map[string]string{"a": "b"}, nil, hdrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]any
+	json.Unmarshal(body, &resp)
+	if resp["x_custom"] != "keep-me" {
+		t.Fatalf("expected custom header preserved, got %v", resp["x_custom"])
+	}
+	ct := resp["content_type"].(string)
+	if !strings.HasPrefix(ct, "multipart/form-data") {
+		t.Fatalf("expected multipart content type, got %s", ct)
+	}
+}
+
+func TestFormPost_DoesNotMutateOriginalHeaders(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	orig := map[string]string{"X-A": "1"}
+	_, _, _ = FormPost(context.Background(), srv.URL, nil, nil, orig)
+	if _, ok := orig["Content-Type"]; ok {
+		t.Fatal("original headers map was mutated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HTTPClient multipart methods
+// ---------------------------------------------------------------------------
+
+func TestHTTPClient_FormPost(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	hc := NewHTTPClient(nil)
+	files := []FormFile{
+		{FieldName: "upload", FileName: "data.csv", Content: strings.NewReader("a,b,c")},
+	}
+	status, body, err := hc.FormPost(context.Background(), srv.URL, map[string]string{"tag": "csv"}, files, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	var resp map[string]any
+	json.Unmarshal(body, &resp)
+	if resp["method"] != "POST" {
+		t.Fatalf("expected POST, got %v", resp["method"])
+	}
+}
+
+func TestHTTPClient_FormPut(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	hc := NewHTTPClient(nil)
+	status, body, err := hc.FormPut(context.Background(), srv.URL, map[string]string{"k": "v"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	var resp map[string]any
+	json.Unmarshal(body, &resp)
+	if resp["method"] != "PUT" {
+		t.Fatalf("expected PUT, got %v", resp["method"])
+	}
+}
+
+func TestHTTPClient_FormPatch(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	hc := NewHTTPClient(nil)
+	status, body, err := hc.FormPatch(context.Background(), srv.URL, map[string]string{"k": "v"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	var resp map[string]any
+	json.Unmarshal(body, &resp)
+	if resp["method"] != "PATCH" {
+		t.Fatalf("expected PATCH, got %v", resp["method"])
+	}
+}
+
+func TestHTTPClient_FormPost_NilContext(t *testing.T) {
+	srv := multipartEchoServer()
+	defer srv.Close()
+
+	hc := NewHTTPClient(nil)
+	status, _, err := hc.FormPost(nil, srv.URL, map[string]string{"a": "b"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+}
