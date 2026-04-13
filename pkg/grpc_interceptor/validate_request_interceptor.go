@@ -84,6 +84,11 @@ func validateRequest(ctx context.Context, req any) error {
 	}
 
 	if err := validate.Struct(req); err != nil {
+		var invalidErr *validator.InvalidValidationError
+		if errors.As(err, &invalidErr) {
+			return nil
+		}
+
 		var validationErrs validator.ValidationErrors
 		if !errors.As(err, &validationErrs) {
 			logger.Errorw(ctx, "Failed to process gRPC request validation",
