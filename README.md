@@ -3,7 +3,6 @@
 
 [![Go](https://img.shields.io/badge/Go-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cyrus-wg/gobox)](https://goreportcard.com/report/github.com/cyrus-wg/gobox)
 
 ---
 

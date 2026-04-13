@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cyrus-wg/gobox/pkg/logger"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -35,6 +36,22 @@ type ServerEntry struct {
 	Name string
 
 	// Timeout is the maximum duration given to this server's Shutdown call.
+	// The effective timeout is min(Timeout, remaining HardTimeout).
+	// Zero or negative values default to 15 s.
+	Timeout time.Duration
+}
+
+// GrpcServerEntry pairs a gRPC server with per-server shutdown settings.
+type GrpcServerEntry struct {
+	// Server is the *grpc.Server to shut down.
+	Server *grpc.Server
+
+	// Name is a human-readable label used in log messages.
+	// If empty, a default "grpc-server-<index>" is generated.
+	Name string
+
+	// Timeout is the maximum duration given to this server's GracefulStop.
+	// If the timeout expires, Stop() is called to force-stop the server.
 	// The effective timeout is min(Timeout, remaining HardTimeout).
 	// Zero or negative values default to 15 s.
 	Timeout time.Duration
@@ -70,6 +87,12 @@ type ShutdownConfig struct {
 	// Each server may specify its own Timeout.
 	Servers []ServerEntry
 
+	// GrpcServers lists the gRPC servers to shut down. Servers are stopped
+	// sequentially after HTTP servers. GracefulStop is attempted first;
+	// if the per-server timeout expires, Stop is called to force-stop.
+	// Each server may specify its own Timeout.
+	GrpcServers []GrpcServerEntry
+
 	// OnShutdown holds cleanup functions that run sequentially (in order)
 	// after every server has been stopped. Common uses include closing
 	// database connections, flushing telemetry, and releasing external
@@ -78,12 +101,14 @@ type ShutdownConfig struct {
 }
 
 // Shutdown blocks until an OS interrupt or SIGTERM is received, then
-// performs a two-phase graceful shutdown:
+// performs a three-phase graceful shutdown:
 //
 //  1. All configured HTTP servers are shut down sequentially so callers
 //     can control the teardown order. Each server gets its own timeout
 //     capped by the global hard timeout.
-//  2. OnShutdown hooks execute sequentially with individual timeouts,
+//  2. All configured gRPC servers are gracefully stopped sequentially.
+//     If a server's timeout expires, Stop() is called to force-stop it.
+//  3. OnShutdown hooks execute sequentially with individual timeouts,
 //     also capped by the remaining hard timeout.
 //
 // If a second signal arrives while shutdown is in progress the process
@@ -92,8 +117,9 @@ type ShutdownConfig struct {
 // Panics inside server shutdown or cleanup hooks are recovered and logged
 // so that remaining operations still execute.
 func Shutdown(ctx context.Context, config ShutdownConfig) {
-	if len(config.Servers) == 0 && len(config.OnShutdown) == 0 {
-		logger.Warnw(ctx, "Shutdown called with no servers and no cleanup hooks")
+	if len(config.Servers) == 0 && len(config.GrpcServers) == 0 && len(config.OnShutdown) == 0 {
+		logger.Info(ctx, "Shutdown called with no servers and no cleanup hooks")
+		return
 	}
 
 	quit := make(chan os.Signal, 1)
@@ -158,7 +184,39 @@ func executeShutdown(ctx context.Context, config ShutdownConfig) {
 		"duration", time.Since(shutdownStart).String(),
 	)
 
-	// ── Phase 2: run cleanup hooks sequentially ─────────────────────────
+	// ── Phase 2: stop gRPC servers sequentially ────────────────────────
+	if len(config.GrpcServers) > 0 {
+		logger.Infow(ctx, "Shutting down gRPC servers",
+			"serverCount", len(config.GrpcServers),
+		)
+
+		for i, entry := range config.GrpcServers {
+			if hardCtx.Err() != nil {
+				logger.Warnw(ctx, "Hard timeout reached, skipping remaining gRPC servers",
+					"skipped", len(config.GrpcServers)-i,
+				)
+				break
+			}
+
+			name := entry.Name
+			if name == "" {
+				name = fmt.Sprintf("grpc-server-%d", i)
+			}
+
+			if entry.Server == nil {
+				logger.Warnw(ctx, "Skipping nil gRPC server entry", "name", name)
+				continue
+			}
+
+			shutdownGrpcServer(ctx, hardCtx, name, entry)
+		}
+
+		logger.Infow(ctx, "All gRPC servers stopped",
+			"duration", time.Since(shutdownStart).String(),
+		)
+	}
+
+	// ── Phase 3: run cleanup hooks sequentially ─────────────────────────
 	if len(config.OnShutdown) > 0 {
 		logger.Infow(ctx, "Running cleanup hooks", "hookCount", len(config.OnShutdown))
 
@@ -218,6 +276,47 @@ func shutdownServer(ctx context.Context, hardCtx context.Context, name string, e
 			"name", name,
 			"duration", time.Since(start).String(),
 		)
+	}
+}
+
+// shutdownGrpcServer gracefully stops a single gRPC server with panic recovery.
+// It attempts GracefulStop first. If the per-server timeout expires before
+// GracefulStop completes, Stop is called to force-stop the server.
+func shutdownGrpcServer(ctx context.Context, hardCtx context.Context, name string, entry GrpcServerEntry) {
+	itemCtx, itemCancel := itemContext(hardCtx, entry.Timeout)
+	defer itemCancel()
+
+	start := time.Now()
+	logger.Infow(ctx, "Stopping gRPC server", "name", name)
+
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Errorw(ctx, "Panic during gRPC server shutdown",
+				"name", name,
+				"panic", fmt.Sprintf("%v", r),
+				"duration", time.Since(start).String(),
+			)
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		entry.Server.GracefulStop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		logger.Infow(ctx, "gRPC server stopped gracefully",
+			"name", name,
+			"duration", time.Since(start).String(),
+		)
+	case <-itemCtx.Done():
+		logger.Warnw(ctx, "gRPC server graceful stop timed out, forcing stop",
+			"name", name,
+			"duration", time.Since(start).String(),
+		)
+		entry.Server.Stop()
 	}
 }
 
