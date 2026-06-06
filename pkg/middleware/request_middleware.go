@@ -64,7 +64,7 @@ func RequestMiddleware(logRequestDetails bool, logCompleteTime bool, bypassList 
 			latency := time.Since(startTime)
 
 			if logCompleteTime && !shouldSkipLogging {
-				logger.Infow(r.Context(), "Request completed", "latency_ms", latency.Milliseconds())
+				logger.Infow(r.Context(), "Request completed", "latency_ms", float64(latency.Microseconds())/1000.0)
 			}
 		})
 	}
