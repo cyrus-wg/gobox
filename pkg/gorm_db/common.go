@@ -1,6 +1,13 @@
+// Package gormdb wraps *gorm.DB with connection management, read-replica
+// support, connection-pool tuning, optional pool monitoring, and a generic,
+// type-safe Repository[T] for common CRUD operations.
+//
+// Use NewDBClient for an injectable instance, or the package-level functions
+// that operate on a shared default client.
 package gormdb
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -14,6 +21,24 @@ type Driver string
 const (
 	MySQL      Driver = "mysql"
 	PostgreSQL Driver = "postgres"
+)
+
+// Sentinel errors returned by this package. Callers can match them with
+// errors.Is. ErrRecordNotFound aliases gorm.ErrRecordNotFound so that both
+// this package's helpers and raw GORM calls compare equal.
+var (
+	// ErrRecordNotFound is returned when a query matches no rows.
+	ErrRecordNotFound = gorm.ErrRecordNotFound
+
+	// ErrDSNRequired is returned by Connect when Config.DSN is empty.
+	ErrDSNRequired = errors.New("gormdb: DSN is required")
+
+	// ErrNotConnected is returned by operations that need an established
+	// connection when Connect has not been called (or Close was called).
+	ErrNotConnected = errors.New("gormdb: not connected; call Connect first")
+
+	// ErrUnsupportedDriver is returned for an unknown Config.Driver.
+	ErrUnsupportedDriver = errors.New("gormdb: unsupported driver")
 )
 
 // DBClient wraps a *gorm.DB with connection management, read-replica

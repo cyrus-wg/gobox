@@ -30,7 +30,7 @@ func TestSendJSONResponse_200(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Fatalf("expected application/json, got %s", ct)
 	}
 	if !strings.Contains(w.Body.String(), `"ok":"yes"`) {
@@ -160,8 +160,19 @@ func TestSendErrorJSONResponse_DoesNotMutateCaller(t *testing.T) {
 func TestSendErrorJSONResponse_ContentType(t *testing.T) {
 	w := httptest.NewRecorder()
 	SendErrorJSONResponse(context.Background(), w, errors.New("x"))
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Fatalf("expected application/json, got %s", ct)
+	}
+}
+
+func TestSendNoContent(t *testing.T) {
+	w := httptest.NewRecorder()
+	SendNoContent(w)
+	if w.Code != 204 {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("expected empty body, got %q", w.Body.String())
 	}
 }
 
@@ -176,7 +187,7 @@ func TestSendPlainTextResponse_200(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "text/plain" {
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
 		t.Fatalf("expected text/plain, got %s", ct)
 	}
 	if !strings.Contains(w.Body.String(), "hello") {

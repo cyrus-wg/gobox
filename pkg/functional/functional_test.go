@@ -2,11 +2,15 @@ package functional
 
 import (
 	"cmp"
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// errSample is a shared sentinel used by error-path tests.
+var errSample = errors.New("sample error")
 
 // ---------------------------------------------------------------------------
 // Map
@@ -201,6 +205,59 @@ func TestReduce(t *testing.T) {
 			t.Errorf("expected initial value 42, got %d", got)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// MapErr / MapIndexed
+// ---------------------------------------------------------------------------
+
+func TestMapErr(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		got, err := MapErr([]int{1, 2, 3}, func(n int) (int, error) { return n * 2, nil })
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertSliceEqual(t, []int{2, 4, 6}, got)
+	})
+	t.Run("stops on error", func(t *testing.T) {
+		calls := 0
+		_, err := MapErr([]int{1, 2, 3}, func(n int) (int, error) {
+			calls++
+			if n == 2 {
+				return 0, errSample
+			}
+			return n, nil
+		})
+		if err != errSample {
+			t.Fatalf("expected errSample, got %v", err)
+		}
+		if calls != 2 {
+			t.Fatalf("expected to stop after 2 calls, got %d", calls)
+		}
+	})
+}
+
+func TestMapIndexed(t *testing.T) {
+	got := MapIndexed([]string{"a", "b", "c"}, func(i int, s string) string {
+		return string(rune('0'+i)) + s
+	})
+	assertSliceEqual(t, []string{"0a", "1b", "2c"}, got)
+}
+
+// ---------------------------------------------------------------------------
+// CountBy
+// ---------------------------------------------------------------------------
+
+func TestCountBy(t *testing.T) {
+	got := CountBy([]int{1, 2, 3, 4, 5, 6}, func(n int) string {
+		if n%2 == 0 {
+			return "even"
+		}
+		return "odd"
+	})
+	if got["even"] != 3 || got["odd"] != 3 {
+		t.Fatalf("unexpected counts: %v", got)
+	}
 }
 
 // ---------------------------------------------------------------------------

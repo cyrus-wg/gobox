@@ -57,4 +57,28 @@ func main() {
 
 	status, _, err = hc.JSONDelete(ctx, srv.URL+"/items/1", nil)
 	fmt.Printf("  DELETE status=%d err=%v\n", status, err)
+	fmt.Println()
+
+	// --- Typed JSON decoding with generics ---
+	fmt.Println("// GetJSON[T] — decode a 2xx response directly into a struct")
+	type echoResponse struct {
+		Method string `json:"method"`
+		Body   string `json:"body"`
+	}
+	echo, status, err := httpclient.PostJSON[echoResponse](ctx, srv.URL+"/items", map[string]string{"name": "widget"}, nil)
+	fmt.Printf("  status=%d err=%v method=%q body=%q\n", status, err, echo.Method, echo.Body)
+	fmt.Println()
+
+	// --- Typed error handling for non-2xx responses ---
+	fmt.Println("// ResponseError — inspect status/body on failures via errors.As")
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"missing"}`))
+	}))
+	defer failSrv.Close()
+
+	_, _, err = httpclient.JSONGet(ctx, failSrv.URL, nil)
+	if respErr, ok := httpclient.AsResponseError(err); ok {
+		fmt.Printf("  status=%d body=%s\n", respErr.StatusCode, strings.TrimSpace(string(respErr.Body)))
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,12 @@ import (
 	"testing"
 	"time"
 )
+
+// errorsAs is a thin wrapper so tests can call errors.As without importing it
+// at every call site.
+func errorsAs(err error, target any) bool {
+	return errors.As(err, target)
+}
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -289,6 +296,96 @@ func TestSendRequest_400PlusReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "forced") {
 		t.Fatalf("expected body despite error, got %q", body)
+	}
+}
+
+func TestSendRequest_400PlusReturnsTypedError(t *testing.T) {
+	srv := statusServer(503)
+	defer srv.Close()
+
+	_, _, err := SendRequest(context.Background(), "GET", srv.URL, nil, nil)
+	respErr, ok := AsResponseError(err)
+	if !ok {
+		t.Fatalf("expected *ResponseError, got %T", err)
+	}
+	if respErr.StatusCode != 503 {
+		t.Fatalf("expected 503, got %d", respErr.StatusCode)
+	}
+	if respErr.Method != "GET" {
+		t.Fatalf("expected method GET, got %s", respErr.Method)
+	}
+	if !strings.Contains(string(respErr.Body), "forced") {
+		t.Fatalf("expected body in error, got %q", respErr.Body)
+	}
+	// errors.As should also work directly.
+	var viaErrorsAs *ResponseError
+	if !errorsAs(err, &viaErrorsAs) {
+		t.Fatal("errors.As should extract *ResponseError")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Typed JSON helpers (GetJSON / PostJSON)
+// ---------------------------------------------------------------------------
+
+func TestGetJSON_DecodesInto(t *testing.T) {
+	srv := echoServer()
+	defer srv.Close()
+
+	type echo struct {
+		Method string `json:"method"`
+	}
+	out, status, err := GetJSON[echo](context.Background(), srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if out.Method != "GET" {
+		t.Fatalf("expected GET, got %q", out.Method)
+	}
+}
+
+func TestPostJSON_DecodesInto(t *testing.T) {
+	srv := echoServer()
+	defer srv.Close()
+
+	type echo struct {
+		Method string `json:"method"`
+		Body   string `json:"body"`
+	}
+	out, status, err := PostJSON[echo](context.Background(), srv.URL, map[string]string{"a": "b"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != 200 {
+		t.Fatalf("expected 200, got %d", status)
+	}
+	if out.Method != "POST" {
+		t.Fatalf("expected POST, got %q", out.Method)
+	}
+	if !strings.Contains(out.Body, `"a":"b"`) {
+		t.Fatalf("expected JSON body echoed, got %q", out.Body)
+	}
+}
+
+func TestGetJSON_ErrorOnStatus(t *testing.T) {
+	srv := statusServer(500)
+	defer srv.Close()
+
+	type payload struct {
+		X int `json:"x"`
+	}
+	_, status, err := GetJSON[payload](context.Background(), srv.URL, nil)
+	if err == nil {
+		t.Fatal("expected error for 500")
+	}
+	if status != 500 {
+		t.Fatalf("expected 500, got %d", status)
+	}
+	if _, ok := AsResponseError(err); !ok {
+		t.Fatalf("expected *ResponseError, got %T", err)
 	}
 }
 

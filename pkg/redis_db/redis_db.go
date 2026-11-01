@@ -3,7 +3,6 @@ package redisdb
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"time"
 
 	"github.com/cyrus-wg/gobox/pkg/logger"
@@ -69,16 +68,16 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 	rc.SetConfig(config) // persist applied defaults for future reference
 
 	if len(config.Addrs) == 0 {
-		return errors.New("redisdb: at least one address is required in Config.Addrs")
+		return ErrNoAddrs
 	}
 
 	// Validate pool hierarchy. go-redis silently clamps invalid values which
 	// masks misconfiguration — fail explicitly instead.
 	if config.MinIdleConns > config.MaxIdleConns {
-		return errors.New("redisdb: MinIdleConns must be ≤ MaxIdleConns")
+		return ErrInvalidPoolMinMax
 	}
 	if config.MaxIdleConns > config.PoolSize {
-		return errors.New("redisdb: MaxIdleConns must be ≤ PoolSize")
+		return ErrInvalidPoolMaxSize
 	}
 
 	// Route go-redis internal log output (e.g. Sentinel discovery, failover
@@ -165,6 +164,16 @@ func (rc *RedisClient) Connect(ctx context.Context) error {
 
 	logger.Infow(ctx, "Redis connection established successfully", "clientName", rc.clientName)
 	return nil
+}
+
+// Ping checks connectivity against the server. It returns ErrNotConnected when
+// no client is set.
+func (rc *RedisClient) Ping(ctx context.Context) error {
+	client := rc.GetClient()
+	if client == nil {
+		return ErrNotConnected
+	}
+	return client.Ping(ctx).Err()
 }
 
 // Reconnect closes the existing connection and re-establishes it using the

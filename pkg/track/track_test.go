@@ -40,6 +40,17 @@ func TestTrackTime_MultipleIndicatorsUsesFirst(t *testing.T) {
 	done()
 }
 
+func TestTrackTimeWith_AttachesFields(t *testing.T) {
+	// Should not panic and should accept structured key-value pairs.
+	done := TrackTimeWith(context.Background(), "with-fields", "order_id", 42, "region", "ap")
+	done()
+}
+
+func TestTrackTimeWith_NoFields(t *testing.T) {
+	done := TrackTimeWith(context.Background(), "no-fields")
+	done()
+}
+
 // ---------------------------------------------------------------------------
 // TrackTime — measures elapsed time correctly
 // ---------------------------------------------------------------------------

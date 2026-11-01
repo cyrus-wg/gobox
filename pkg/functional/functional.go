@@ -1,3 +1,10 @@
+// Package functional provides generic, allocation-conscious helpers for slices
+// and maps: transformations (Map, FlatMap), filtering, aggregation, grouping,
+// partitioning, chunking, deduplication, and zipping.
+//
+// Functions never mutate their inputs. Where a function cannot produce a result
+// (e.g. Min of an empty slice) it returns a (value, ok) pair following Go
+// convention.
 package functional
 
 import (
@@ -97,6 +104,29 @@ func Reduce[T any, U any](input []T, reducer func(U, T) U, initial U) U {
 	result := initial
 	for _, v := range input {
 		result = reducer(result, v)
+	}
+	return result
+}
+
+// MapErr is like Map but the mapper may fail. It returns the first error
+// encountered (along with a nil slice) and stops early.
+func MapErr[T any, U any](input []T, mapper func(T) (U, error)) ([]U, error) {
+	result := make([]U, len(input))
+	for i, v := range input {
+		mapped, err := mapper(v)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = mapped
+	}
+	return result, nil
+}
+
+// MapIndexed applies a mapper that also receives each element's index.
+func MapIndexed[T any, U any](input []T, mapper func(int, T) U) []U {
+	result := make([]U, len(input))
+	for i, v := range input {
+		result[i] = mapper(i, v)
 	}
 	return result
 }
@@ -264,6 +294,15 @@ func GroupBy[T any, K comparable](input []T, keySelector func(T) K) map[K][]T {
 	for _, v := range input {
 		key := keySelector(v)
 		result[key] = append(result[key], v)
+	}
+	return result
+}
+
+// CountBy tallies elements by key, returning a map of key → occurrence count.
+func CountBy[T any, K comparable](input []T, keySelector func(T) K) map[K]int {
+	result := make(map[K]int)
+	for _, v := range input {
+		result[keySelector(v)]++
 	}
 	return result
 }

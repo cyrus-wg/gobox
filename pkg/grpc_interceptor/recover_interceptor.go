@@ -1,3 +1,8 @@
+// Package grpcinterceptor provides reusable gRPC server interceptors for panic
+// recovery, request logging (with request-ID injection and bypass rules), and
+// struct-tag request validation. Both unary and streaming variants are
+// provided and can be chained via grpc.ChainUnaryInterceptor /
+// grpc.ChainStreamInterceptor.
 package grpcinterceptor
 
 import (

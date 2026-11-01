@@ -1,6 +1,11 @@
+// Package redisdb wraps redis/go-redis's UniversalClient with connection
+// management, config storage, sensible defaults, pool validation, and
+// structured logging. Use NewRedisClient for an injectable instance, or the
+// package-level functions that operate on a shared default client.
 package redisdb
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -14,6 +19,27 @@ const (
 	ReadFromReplica ReadRouting = "replica" // ReadOnly
 	ReadByLatency   ReadRouting = "latency" // RouteByLatency
 	ReadRandomly    ReadRouting = "random"  // RouteRandomly
+)
+
+// Nil is returned by go-redis when a key does not exist. It is re-exported here
+// so callers can check errors.Is(err, redisdb.Nil) without importing go-redis
+// directly.
+var Nil = redis.Nil
+
+// Sentinel errors returned by this package; match them with errors.Is.
+var (
+	// ErrNoAddrs is returned by Connect when Config.Addrs is empty.
+	ErrNoAddrs = errors.New("redisdb: at least one address is required in Config.Addrs")
+
+	// ErrInvalidPoolMinMax is returned when MinIdleConns > MaxIdleConns.
+	ErrInvalidPoolMinMax = errors.New("redisdb: MinIdleConns must be <= MaxIdleConns")
+
+	// ErrInvalidPoolMaxSize is returned when MaxIdleConns > PoolSize.
+	ErrInvalidPoolMaxSize = errors.New("redisdb: MaxIdleConns must be <= PoolSize")
+
+	// ErrNotConnected is returned by operations that require an established
+	// connection when Connect has not been called (or Close was called).
+	ErrNotConnected = errors.New("redisdb: not connected; call Connect first")
 )
 
 // RedisClient wraps a redis.UniversalClient with connection management,
@@ -66,7 +92,7 @@ type Config struct {
 	//   - Multiple addresses + MasterName → Sentinel mode
 	//   - Multiple addresses (no master)  → Cluster mode
 	Addrs            []string
-	Username         string // optional username for Redis auth (if enabled on server)
+	Username         string
 	Password         string
 	SentinelUsername string // optional username for Sentinel auth (if MasterName is set)
 	SentinelPassword string // optional password for Sentinel auth (if MasterName is set)

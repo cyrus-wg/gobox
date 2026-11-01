@@ -474,6 +474,91 @@ func TestGenerateErrorID_LengthAndCharset(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// New v2 helpers: As, WithExtraInfo, WithErrorCode, new constructors
+// ---------------------------------------------------------------------------
+
+func TestAs_Found(t *testing.T) {
+	inner := NewNotFoundError("NF", "gone", nil, nil)
+	wrapped := fmt.Errorf("ctx: %w", inner)
+	got, ok := As(wrapped)
+	if !ok {
+		t.Fatal("expected As to find HTTPError")
+	}
+	if got.HTTPStatusCode != 404 {
+		t.Fatalf("expected 404, got %d", got.HTTPStatusCode)
+	}
+}
+
+func TestAs_NotFound(t *testing.T) {
+	if _, ok := As(errors.New("plain")); ok {
+		t.Fatal("expected As to return false for plain error")
+	}
+}
+
+func TestWithExtraInfo_ReturnsCopy(t *testing.T) {
+	SetErrorIDLength(0)
+	orig := NewBadRequestError("C", "m", nil, "original")
+	clone := orig.WithExtraInfo("replaced")
+	if clone.ExtraInfo != "replaced" {
+		t.Fatalf("expected replaced, got %v", clone.ExtraInfo)
+	}
+	if orig.ExtraInfo != "original" {
+		t.Fatalf("original was mutated: %v", orig.ExtraInfo)
+	}
+}
+
+func TestWithErrorCode_ReturnsCopy(t *testing.T) {
+	SetErrorIDLength(0)
+	orig := NewBadRequestError("OLD", "m", nil, nil)
+	clone := orig.WithErrorCode("NEW")
+	if clone.ErrorCode != "NEW" {
+		t.Fatalf("expected NEW, got %s", clone.ErrorCode)
+	}
+	if orig.ErrorCode != "OLD" {
+		t.Fatalf("original was mutated: %s", orig.ErrorCode)
+	}
+}
+
+func TestNewConstructors_StatusCodes(t *testing.T) {
+	SetErrorIDLength(0)
+	tests := []struct {
+		fn       func(string, string, error, any) *HTTPError
+		wantCode int
+	}{
+		{NewUnprocessableEntityError, 422},
+		{NewServiceUnavailableError, 503},
+	}
+	for _, tt := range tests {
+		e := tt.fn("C", "m", nil, nil)
+		if e.HTTPStatusCode != tt.wantCode {
+			t.Errorf("expected %d, got %d", tt.wantCode, e.HTTPStatusCode)
+		}
+	}
+}
+
+func TestConcurrentConfigAccess(t *testing.T) {
+	// Exercise the atomic-backed config under concurrent read/write to catch
+	// races when run with -race.
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 100; j++ {
+				_ = SetErrorIDLength(j % 33)
+				_ = GetErrorIDLength()
+				SetWithExtraInfo(j%2 == 0)
+				_ = IsWithExtraInfoEnabled()
+				_ = NewInternalServerError("", "", nil, nil)
+			}
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		<-done
+	}
+	_ = SetErrorIDLength(6) // restore
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchSubstring(s, substr)
 }

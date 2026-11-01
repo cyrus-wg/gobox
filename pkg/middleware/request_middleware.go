@@ -59,15 +59,61 @@ func RequestMiddleware(logRequestDetails bool, logCompleteTime bool, bypassList 
 				logger.Infow(r.Context(), "Incoming request", "details", requestData)
 			}
 
-			next.ServeHTTP(w, r)
+			rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+			next.ServeHTTP(rw, r)
 
 			latency := time.Since(startTime)
 
 			if logCompleteTime && !shouldSkipLogging {
-				logger.Infow(r.Context(), "Request completed", "latency_ms", float64(latency.Microseconds())/1000.0)
+				logger.Infow(r.Context(), "Request completed",
+					"status_code", rw.status,
+					"response_bytes", rw.written,
+					"latency_ms", float64(latency.Microseconds())/1000.0,
+				)
 			}
 		})
 	}
+}
+
+// responseWriter wraps http.ResponseWriter to capture the status code and the
+// number of bytes written, so the completion log can report them. It forwards
+// optional interfaces (http.Flusher, http.Hijacker) that handlers may rely on.
+type responseWriter struct {
+	http.ResponseWriter
+	status      int
+	written     int
+	wroteHeader bool
+}
+
+func (w *responseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.written += n
+	return n, err
+}
+
+// Flush implements http.Flusher when the underlying writer supports it.
+func (w *responseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying ResponseWriter for http.ResponseController
+// (Go 1.20+), preserving access to Hijacker, Flusher, deadlines, etc.
+func (w *responseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 type BypassRequestLogging struct {
@@ -84,7 +130,7 @@ func compileBypassPatterns(patterns []BypassRequestLogging) []BypassRequestLoggi
 	for i, p := range patterns {
 		compiled[i] = p
 		if p.IsRegex {
-			if re, err := regexp.Compile("^" + p.Path + "$"); err == nil {
+			if re, err := pattern.Compile(p.Path); err == nil {
 				compiled[i].regex = re
 			}
 		}

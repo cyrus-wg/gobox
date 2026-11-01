@@ -5,11 +5,13 @@ import (
 	"fmt"
 
 	"github.com/cyrus-wg/gobox/pkg/logger"
+	"go.uber.org/zap/zapcore"
 )
 
 func main() {
 	globalLoggerExample()
 	instanceLoggerExample()
+	childLoggerExample()
 }
 
 // globalLoggerExample demonstrates the package-level global logger.
@@ -122,6 +124,32 @@ func instanceLoggerExample() {
 	fmt.Println("extra fields   :", log.GetExtraFieldsList())
 
 	log.Flush()
+}
+
+// childLoggerExample demonstrates the v2 additions: child loggers via With /
+// Named that pin structured fields, and runtime level control via SetLevel.
+func childLoggerExample() {
+	printSeparator("CHILD LOGGERS & RUNTIME LEVEL")
+
+	base := logger.NewLogger(logger.LoggerConfig{
+		FixedKeyValues: map[string]any{"service": "billing"},
+	})
+	ctx := context.Background()
+
+	// With pins fields onto every entry from the child; the parent is unchanged.
+	reqLog := base.With("component", "invoice", "tenant", "acme")
+	reqLog.Info(ctx, "generating invoice") // includes component + tenant
+
+	// Named adds a dot-separated scope name.
+	workerLog := base.Named("worker")
+	workerLog.Info(ctx, "processing job")
+
+	// SetLevel changes verbosity at runtime; children share the same level.
+	base.SetLevel(zapcore.DebugLevel)
+	reqLog.Debug(ctx, "now visible because level lowered to debug")
+	fmt.Println("debug enabled after SetLevel:", base.IsDebugLogLevel())
+
+	base.Flush()
 }
 
 func printSeparator(title string) {

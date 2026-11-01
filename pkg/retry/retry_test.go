@@ -650,3 +650,42 @@ func TestSleep_NegativeDuration(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WithMaxElapsedTime
+// ---------------------------------------------------------------------------
+
+func TestDo_MaxElapsedTimeStopsEarly(t *testing.T) {
+	start := time.Now()
+	calls := 0
+	_, err := Do(context.Background(), func(ctx context.Context) (int, error) {
+		calls++
+		return 0, errTemporary
+	}, WithMaxAttempts(100), WithInitialDelay(20*time.Millisecond), WithMaxElapsedTime(60*time.Millisecond))
+
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error once the budget is exhausted")
+	}
+	// Should not run all 100 attempts; the ~60ms budget bounds it.
+	if calls == 0 || calls > 10 {
+		t.Fatalf("expected a small number of calls within budget, got %d", calls)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("MaxElapsedTime should cap total time, took %v", elapsed)
+	}
+}
+
+func TestDo_MaxElapsedTimeDisabledByDefault(t *testing.T) {
+	calls := 0
+	_, err := Do(context.Background(), func(ctx context.Context) (int, error) {
+		calls++
+		return 0, errTemporary
+	}, WithMaxAttempts(3), WithInitialDelay(time.Millisecond))
+	if !errors.Is(err, errTemporary) {
+		t.Fatalf("expected errTemporary, got %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 calls, got %d", calls)
+	}
+}

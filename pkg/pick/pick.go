@@ -1,3 +1,7 @@
+// Package pick provides small, generic selection helpers that Go's standard
+// library lacks: a ternary-style If, zero-value/pointer/map/slice fallbacks
+// following the (value, ok) convention, SQL-style Coalesce, and string parsers
+// with defaults.
 package pick
 
 import "strconv"
@@ -66,6 +70,26 @@ func OrDefaultPtr[T any](ptr *T, defaultValue T) (T, bool) {
 		return defaultValue, false
 	}
 	return *ptr, true
+}
+
+// Deref returns the value pointed to by ptr, or the zero value of T when ptr is
+// nil. It is a concise way to read optional pointer fields.
+//
+//	name := pick.Deref(req.Name) // "" when req.Name is nil
+func Deref[T any](ptr *T) T {
+	if ptr == nil {
+		var zero T
+		return zero
+	}
+	return *ptr
+}
+
+// Ptr returns a pointer to v. It is useful for populating optional pointer
+// fields inline:
+//
+//	req := Request{Timeout: pick.Ptr(30)}
+func Ptr[T any](v T) *T {
+	return &v
 }
 
 // OrDefaultFunc returns value with ok=true when value is not the zero value of T.

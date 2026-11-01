@@ -125,6 +125,7 @@ func runAllTests(ctx context.Context, driver gormdb.Driver, dsn string) error {
 		{"GormLogger Info/Warn/Error methods", testGormLoggerDirectMethods},
 		{"SetConfig re-applies defaults", testSetConfigDefaults},
 		{"CRUD", testCRUD},
+		{"Repository[T] generic CRUD", testRepository},
 		{"Transaction commit (two-client)", testTxCommitTwoClients},
 		{"Transaction rollback (two-client)", testTxRollbackTwoClients},
 		{"RunInTransaction (two-client)", testRunInTransaction},
@@ -532,6 +533,72 @@ func testCRUD(_ context.Context, a, _ *gormdb.DBClient) error {
 	}
 	assertEq("unscoped count", 3, len(all))
 
+	return nil
+}
+
+// ──────────────────────────────────────────────
+// Repository[T]: exercise the generic, type-safe
+// CRUD helper against the same Product table.
+// ──────────────────────────────────────────────
+
+func testRepository(ctx context.Context, a, _ *gormdb.DBClient) error {
+	repo := gormdb.NewRepository[Product](a)
+
+	// Create.
+	p := &Product{Name: "RepoItem", Price: 3.50}
+	if err := repo.Create(ctx, p); err != nil {
+		return fmt.Errorf("repo create: %w", err)
+	}
+	assertNeq("repo assigned ID", uint(0), p.ID)
+
+	// GetByID.
+	got, err := repo.GetByID(ctx, p.ID)
+	if err != nil {
+		return fmt.Errorf("repo get: %w", err)
+	}
+	assertEq("repo GetByID name", "RepoItem", got.Name)
+
+	// UpdateByID.
+	n, err := repo.UpdateByID(ctx, p.ID, map[string]any{"price": 4.25})
+	if err != nil {
+		return fmt.Errorf("repo update: %w", err)
+	}
+	assertEq("repo rows updated", int64(1), n)
+
+	// First with a filter.
+	found, err := repo.First(ctx, gormdb.Query{Where: "name = ?", Args: []any{"RepoItem"}})
+	if err != nil {
+		return fmt.Errorf("repo first: %w", err)
+	}
+	assertEq("repo First price", 4.25, found.Price)
+
+	// Count.
+	count, err := repo.Count(ctx, gormdb.Query{Where: "name = ?", Args: []any{"RepoItem"}})
+	if err != nil {
+		return fmt.Errorf("repo count: %w", err)
+	}
+	assertEq("repo Count", int64(1), count)
+
+	// Transaction (commit).
+	err = repo.Transaction(ctx, func(txRepo *gormdb.Repository[Product]) error {
+		return txRepo.Create(ctx, &Product{Name: "RepoTxItem", Price: 1.0})
+	})
+	if err != nil {
+		return fmt.Errorf("repo tx: %w", err)
+	}
+	txExists, _ := repo.Exists(ctx, gormdb.Query{Where: "name = ?", Args: []any{"RepoTxItem"}})
+	assertEq("repo tx committed", true, txExists)
+
+	// DeleteByID.
+	if _, err := repo.DeleteByID(ctx, p.ID); err != nil {
+		return fmt.Errorf("repo delete: %w", err)
+	}
+
+	// GetByID after delete → not found.
+	_, err = repo.GetByID(ctx, p.ID)
+	assertEq("repo IsNotFound after delete", true, gormdb.IsNotFound(err))
+
+	fmt.Println("        ✓ Repository[T] CRUD, filters, count, transaction, delete OK")
 	return nil
 }
 

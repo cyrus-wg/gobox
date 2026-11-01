@@ -4,7 +4,82 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap/zapcore"
 )
+
+// ---------------------------------------------------------------------------
+// With / Named / SetLevel (v2 additions)
+// ---------------------------------------------------------------------------
+
+func TestLogger_With_NoPanic(t *testing.T) {
+	l := NewLogger(Config{})
+	child := l.With("component", "auth")
+	if child == nil {
+		t.Fatal("With returned nil")
+	}
+	child.Info(context.Background(), "child log")
+	// With() with no args returns the same logger.
+	if l.With() != l {
+		t.Fatal("With() with no args should return the same logger")
+	}
+}
+
+func TestLogger_Named_NoPanic(t *testing.T) {
+	l := NewLogger(Config{})
+	named := l.Named("subsystem")
+	if named == nil {
+		t.Fatal("Named returned nil")
+	}
+	named.Info(context.Background(), "named log")
+}
+
+func TestLogger_SetLevel(t *testing.T) {
+	l := NewLogger(Config{})
+	if l.IsDebugLogLevel() {
+		t.Fatal("default should not be debug")
+	}
+	l.SetLevel(zapcore.DebugLevel)
+	if !l.IsDebugLogLevel() {
+		t.Fatal("expected debug enabled after SetLevel")
+	}
+	if l.GetLevel() != zapcore.DebugLevel {
+		t.Fatalf("expected debug level, got %v", l.GetLevel())
+	}
+	if !l.Enabled(zapcore.ErrorLevel) {
+		t.Fatal("error should be enabled at debug level")
+	}
+}
+
+func TestLogger_SetLevel_SharedWithChildren(t *testing.T) {
+	l := NewLogger(Config{})
+	child := l.With("k", "v")
+	l.SetLevel(zapcore.DebugLevel)
+	if !child.IsDebugLogLevel() {
+		t.Fatal("child should share the parent's atomic level")
+	}
+}
+
+func TestGlobal_SetLevel(t *testing.T) {
+	InitGlobalLogger(Config{})
+	SetLevel(zapcore.DebugLevel)
+	if !IsDebugLogLevel() {
+		t.Fatal("expected global debug enabled")
+	}
+	if GetLevel() != zapcore.DebugLevel {
+		t.Fatalf("expected debug, got %v", GetLevel())
+	}
+	if !Enabled(zapcore.WarnLevel) {
+		t.Fatal("warn should be enabled at debug")
+	}
+	SetLevel(zapcore.InfoLevel) // restore
+}
+
+func TestL_NeverNil(t *testing.T) {
+	if L() == nil {
+		t.Fatal("L() must never return nil")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // NewLogger / LoggerConfig

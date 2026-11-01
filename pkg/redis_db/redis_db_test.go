@@ -2,6 +2,7 @@ package redisdb
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -168,8 +169,15 @@ func TestConnect_EmptyAddrs(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty addrs")
 	}
-	if err.Error() != "redisdb: at least one address is required in Config.Addrs" {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrNoAddrs) {
+		t.Fatalf("expected ErrNoAddrs, got %v", err)
+	}
+}
+
+func TestPing_NotConnected(t *testing.T) {
+	rc := NewRedisClient("test", Config{})
+	if err := rc.Ping(context.Background()); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("expected ErrNotConnected, got %v", err)
 	}
 }
 
@@ -181,8 +189,8 @@ func TestConnect_InvalidPoolHierarchy_MinGtMax(t *testing.T) {
 		PoolSize:     20,
 	})
 	err := rc.Connect(context.Background())
-	if err == nil {
-		t.Fatal("expected error for MinIdleConns > MaxIdleConns")
+	if !errors.Is(err, ErrInvalidPoolMinMax) {
+		t.Fatalf("expected ErrInvalidPoolMinMax, got %v", err)
 	}
 }
 
@@ -194,8 +202,8 @@ func TestConnect_InvalidPoolHierarchy_MaxGtPool(t *testing.T) {
 		PoolSize:     10,
 	})
 	err := rc.Connect(context.Background())
-	if err == nil {
-		t.Fatal("expected error for MaxIdleConns > PoolSize")
+	if !errors.Is(err, ErrInvalidPoolMaxSize) {
+		t.Fatalf("expected ErrInvalidPoolMaxSize, got %v", err)
 	}
 }
 

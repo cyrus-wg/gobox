@@ -1,8 +1,15 @@
+// Package pattern provides three string-matching strategies commonly needed
+// for routing, log filtering, and namespace matching:
+//
+//   - MatchAnt: Ant-style globs with "/" segment semantics (*, **, ?).
+//   - MatchWildcard: flat shell-style globs (*, ?) with no segment semantics.
+//   - MatchRegex: anchored regular expressions with an internal compile cache.
 package pattern
 
 import (
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // MatchAnt reports whether s matches the given Ant-style glob pattern.
@@ -13,8 +20,8 @@ import (
 //   - *  matches zero or more characters within a single segment
 //   - ** matches zero or more complete segments (including none)
 //
-// Common uses include URL paths, file paths, config key hierarchies, and
-// any dot- or slash-delimited namespace (e.g. "org.**.service.*").
+// Common uses include URL paths, file paths, config key hierarchies, and any
+// dot- or slash-delimited namespace (e.g. "org.**.service.*").
 //
 // Examples:
 //
@@ -38,9 +45,6 @@ func MatchAnt(pattern, s string) bool {
 // Unlike MatchAnt, this operates on a flat string with no segment semantics —
 // * can match across any character including "/" or ".".
 //
-// Useful for simple shell-style glob matching on filenames, identifiers,
-// or any string where segment boundaries are irrelevant.
-//
 //   - ? matches exactly one character
 //   - * matches zero or more characters
 //
@@ -55,14 +59,43 @@ func MatchWildcard(pattern, s string) bool {
 }
 
 // MatchRegex reports whether path matches the given regular expression.
-// The pattern is automatically anchored (^ and $) so partial matches are rejected.
-// Returns false if the pattern fails to compile.
+// The pattern is automatically anchored (^ and $) so partial matches are
+// rejected. Compiled patterns are cached, so repeated calls with the same
+// pattern avoid recompilation. Returns false if the pattern fails to compile.
 func MatchRegex(regexPattern, path string) bool {
-	re, err := regexp.Compile("^" + regexPattern + "$")
+	re, err := compileAnchored(regexPattern)
 	if err != nil {
 		return false
 	}
 	return re.MatchString(path)
+}
+
+// Compile returns an anchored, cached *regexp.Regexp for the given pattern.
+// It is useful when a caller wants to compile once and reuse, or to surface a
+// compilation error explicitly (unlike MatchRegex, which swallows it).
+func Compile(regexPattern string) (*regexp.Regexp, error) {
+	return compileAnchored(regexPattern)
+}
+
+// regexCache memoises anchored regexp compilations keyed by the raw pattern.
+var regexCache sync.Map // map[string]*regexpCacheEntry
+
+type regexpCacheEntry struct {
+	re  *regexp.Regexp
+	err error
+}
+
+func compileAnchored(pattern string) (*regexp.Regexp, error) {
+	if v, ok := regexCache.Load(pattern); ok {
+		entry := v.(*regexpCacheEntry)
+		return entry.re, entry.err
+	}
+	re, err := regexp.Compile("^" + pattern + "$")
+	// LoadOrStore keeps the first successful/observed compilation and avoids
+	// storing duplicates under races.
+	actual, _ := regexCache.LoadOrStore(pattern, &regexpCacheEntry{re: re, err: err})
+	entry := actual.(*regexpCacheEntry)
+	return entry.re, entry.err
 }
 
 func matchAntParts(patternParts, pathParts []string) bool {

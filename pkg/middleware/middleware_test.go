@@ -161,7 +161,7 @@ func TestRecoverMiddleware_PanicString(t *testing.T) {
 	if w.Code != 500 {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Fatalf("expected application/json, got %s", ct)
 	}
 }
@@ -232,6 +232,44 @@ func TestRequestMiddleware_LogsRequestDetails(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestRequestMiddleware_CapturesStatusAndBody(t *testing.T) {
+	// The wrapped ResponseWriter should record the handler's status code and
+	// bytes written, and still pass them through to the client.
+	handler := RequestMiddleware(false, true)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte("short and stout"))
+		}),
+	)
+
+	req := httptest.NewRequest("GET", "/api/teapot", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTeapot {
+		t.Fatalf("expected 418, got %d", w.Code)
+	}
+	if w.Body.String() != "short and stout" {
+		t.Fatalf("unexpected body: %q", w.Body.String())
+	}
+}
+
+func TestRequestMiddleware_DefaultStatusWhenNotSet(t *testing.T) {
+	// A handler that writes a body without an explicit WriteHeader should be
+	// treated as 200 by the wrapper.
+	handler := RequestMiddleware(false, true)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte("ok"))
+		}),
+	)
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}

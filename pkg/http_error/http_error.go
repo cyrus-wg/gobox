@@ -1,3 +1,10 @@
+// Package httperror provides a structured HTTP error type suitable for JSON
+// APIs, along with convenience constructors for common status codes and helpers
+// to convert arbitrary errors into a consistent shape.
+//
+// All package-level configuration (error-ID length, extra-info toggle, default
+// internal-server-error message/code) is stored atomically and is safe to read
+// and update concurrently.
 package httperror
 
 import (
@@ -6,54 +13,86 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"reflect"
+	"sync/atomic"
 )
 
+const (
+	// maxErrorIDLength is the largest permitted random error-ID length.
+	maxErrorIDLength = 128
+
+	// DefaultErrorIDLength is the default random error-ID length.
+	DefaultErrorIDLength = 6
+)
+
+// Package-level configuration held in atomics for concurrency safety.
 var (
-	errorIDLength                     = 6
-	withExtraInfo                     = true
-	defaultInternalServerErrorMessage = "Internal Server Error"
-	defaultInternalServerErrorCode    = "500"
+	errorIDLength                     atomic.Int64
+	withExtraInfo                     atomic.Bool
+	defaultInternalServerErrorMessage atomic.Value // string
+	defaultInternalServerErrorCode    atomic.Value // string
 )
 
-func SetErrorIDLength(length int) error {
-	if (length < 0) || (length > 32) {
-		return errors.New("error ID length must be between 0 and 32")
-	}
+func init() {
+	errorIDLength.Store(DefaultErrorIDLength)
+	withExtraInfo.Store(true)
+	defaultInternalServerErrorMessage.Store("Internal Server Error")
+	defaultInternalServerErrorCode.Store("500")
+}
 
-	errorIDLength = length
+// SetErrorIDLength sets the length of the random error ID generated for each
+// error. A length of 0 disables ID generation. Valid range is [0, 32].
+func SetErrorIDLength(length int) error {
+	if length < 0 || length > maxErrorIDLength {
+		return fmt.Errorf("httperror: error ID length must be between 0 and %d, got %d", maxErrorIDLength, length)
+	}
+	errorIDLength.Store(int64(length))
 	return nil
 }
 
+// GetErrorIDLength returns the current random error-ID length.
 func GetErrorIDLength() int {
-	return errorIDLength
+	return int(errorIDLength.Load())
 }
 
+// SetWithExtraInfo toggles whether ExtraInfo is included when serialising
+// errors (see http_response.SendErrorJSONResponse). Disable it in production to
+// avoid leaking internal details.
 func SetWithExtraInfo(enabled bool) {
-	withExtraInfo = enabled
+	withExtraInfo.Store(enabled)
 }
 
+// IsWithExtraInfoEnabled reports whether ExtraInfo inclusion is enabled.
 func IsWithExtraInfoEnabled() bool {
-	return withExtraInfo
+	return withExtraInfo.Load()
 }
 
+// SetDefaultInternalServerErrorMessage sets the fallback message used by
+// NewInternalServerError when none is supplied.
 func SetDefaultInternalServerErrorMessage(message string) {
-	defaultInternalServerErrorMessage = message
+	defaultInternalServerErrorMessage.Store(message)
 }
 
+// GetDefaultInternalServerErrorMessage returns the fallback ISE message.
 func GetDefaultInternalServerErrorMessage() string {
-	return defaultInternalServerErrorMessage
+	return defaultInternalServerErrorMessage.Load().(string)
 }
 
+// SetDefaultInternalServerErrorCode sets the fallback error code used by
+// NewInternalServerError when none is supplied.
 func SetDefaultInternalServerErrorCode(code string) {
-	defaultInternalServerErrorCode = code
+	defaultInternalServerErrorCode.Store(code)
 }
 
+// GetDefaultInternalServerErrorCode returns the fallback ISE error code.
 func GetDefaultInternalServerErrorCode() string {
-	return defaultInternalServerErrorCode
+	return defaultInternalServerErrorCode.Load().(string)
 }
 
+// HTTPError is a structured error that carries an HTTP status code and
+// JSON-serialisable metadata. It implements error, and Unwrap exposes the
+// wrapped OriginalError for use with errors.Is / errors.As.
 type HTTPError struct {
 	HTTPStatusCode int    `json:"http_status_code"`
 	ErrorCode      string `json:"error_code,omitempty"`
@@ -63,7 +102,8 @@ type HTTPError struct {
 	ExtraInfo      any    `json:"extra_info,omitempty"`
 }
 
-// httpErrorJSON is an alias used inside MarshalJSON to avoid infinite recursion.
+// httpErrorJSON mirrors HTTPError without a custom MarshalJSON, used inside
+// MarshalJSON to avoid infinite recursion.
 type httpErrorJSON struct {
 	HTTPStatusCode int    `json:"http_status_code"`
 	ErrorCode      string `json:"error_code,omitempty"`
@@ -73,11 +113,10 @@ type httpErrorJSON struct {
 }
 
 // MarshalJSON implements custom JSON marshaling for HTTPError.
-// This is needed because ExtraInfo is typed as `any`, and certain concrete types
-// stored in the interface (e.g., error, fmt.Stringer, or structs with no exported
-// fields) have no exported fields visible to encoding/json, causing it to produce
-// "{}" instead of a meaningful value. This method normalizes ExtraInfo before
-// serialization to ensure all types produce useful JSON output.
+// ExtraInfo is typed as `any`; certain concrete values (errors, fmt.Stringer,
+// structs with no exported fields, NaN/Inf floats, maps with non-string keys,
+// funcs/chans) do not serialise usefully by default. normalizeForJSON rewrites
+// ExtraInfo into a JSON-friendly value first.
 func (e *HTTPError) MarshalJSON() ([]byte, error) {
 	return json.Marshal(httpErrorJSON{
 		HTTPStatusCode: e.HTTPStatusCode,
@@ -88,31 +127,21 @@ func (e *HTTPError) MarshalJSON() ([]byte, error) {
 	})
 }
 
-// normalizeForJSON ensures that the value is properly JSON-serializable.
-//
-// It handles the following cases:
-//   - nil: returned as-is
-//   - json.Marshaler: returned as-is (it knows how to serialize itself)
-//   - Struct with exported fields: returned as-is
-//   - Struct with NO exported fields: converted to string via error.Error(),
-//     fmt.Stringer.String(), or fmt.Sprintf as fallback
-//   - Float64/Float32 NaN or ±Inf: converted to string (JSON spec forbids these)
-//   - Map with non-string keys: converted to map[string]any with keys stringified
-//   - Primitives (string, int, float, bool), slices, arrays: returned as-is
-//   - Non-serializable types (func, chan): converted to string representation
+// normalizeForJSON ensures the value is JSON-serialisable, converting
+// otherwise-empty or invalid values to a useful string representation.
 func normalizeForJSON(v any) any {
 	if v == nil {
 		return nil
 	}
 
-	// If it implements json.Marshaler, it knows how to serialize itself
+	// If it implements json.Marshaler, it knows how to serialize itself.
 	if _, ok := v.(json.Marshaler); ok {
 		return v
 	}
 
 	rv := reflect.ValueOf(v)
-	// Dereference pointers and interfaces to get the concrete value
-	for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+	// Dereference pointers and interfaces to get the concrete value.
+	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
 		if rv.IsNil() {
 			return nil
 		}
@@ -121,18 +150,15 @@ func normalizeForJSON(v any) any {
 
 	switch rv.Kind() {
 	case reflect.Struct:
-		// Check if struct has any exported fields that json.Marshal can see
 		t := rv.Type()
-		for i := 0; i < t.NumField(); i++ {
-			if t.Field(i).IsExported() {
-				// Has exported fields - json.Marshal will produce meaningful output
+		for field := range t.Fields() {
+			if field.IsExported() {
 				return v
 			}
 		}
-		// No exported fields → fall through to string conversion
+		// No exported fields → fall through to string conversion.
 
 	case reflect.Float32, reflect.Float64:
-		// JSON spec does not allow NaN or ±Inf; json.Marshal would return an error
 		f := rv.Float()
 		if math.IsNaN(f) || math.IsInf(f, 0) {
 			return fmt.Sprintf("%v", f)
@@ -140,9 +166,6 @@ func normalizeForJSON(v any) any {
 		return v
 
 	case reflect.Map:
-		// JSON requires string keys. If the map key type is string, return as-is.
-		// If the key implements encoding.TextMarshaler, json.Marshal handles it.
-		// Otherwise, convert keys to strings to avoid a marshal error.
 		keyType := rv.Type().Key()
 		if keyType.Kind() == reflect.String {
 			return v
@@ -150,7 +173,6 @@ func normalizeForJSON(v any) any {
 		if keyType.Implements(textMarshalerType) {
 			return v
 		}
-		// Convert map[K]V → map[string]any with keys stringified
 		result := make(map[string]any, rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
@@ -160,11 +182,10 @@ func normalizeForJSON(v any) any {
 		return result
 
 	case reflect.Slice, reflect.Array:
-		// Recursively normalize slice/array elements (they may contain non-serializable values)
 		length := rv.Len()
 		result := make([]any, length)
 		needsNormalization := false
-		for i := 0; i < length; i++ {
+		for i := range length {
 			elem := rv.Index(i).Interface()
 			normalized := normalizeForJSON(elem)
 			result[i] = normalized
@@ -178,14 +199,13 @@ func normalizeForJSON(v any) any {
 		return v
 
 	case reflect.Func, reflect.Chan:
-		// These types are not JSON-serializable → fall through to string conversion
+		// Not JSON-serialisable → fall through to string conversion.
 
 	default:
-		// Primitives (string, int, bool) all serialize correctly
 		return v
 	}
 
-	// For non-serializable types, convert to the best string representation available
+	// For non-serialisable types, convert to the best string representation.
 	if err, ok := v.(error); ok {
 		return err.Error()
 	}
@@ -198,83 +218,125 @@ func normalizeForJSON(v any) any {
 // textMarshalerType is cached for reflect type comparison in map key handling.
 var textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 
-func NewError(httpCode int, errorCode string, message string, originalError error, extraInfo any) *HTTPError {
-	errorId := ""
-	if errorIDLength > 0 {
-		errorId = generateErrorID()
+// New creates a new *HTTPError. A random ErrorID is attached when the
+// configured error-ID length is greater than zero.
+func New(httpCode int, errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	errorID := ""
+	if n := int(errorIDLength.Load()); n > 0 {
+		errorID = generateErrorID(n)
 	}
 
 	return &HTTPError{
 		HTTPStatusCode: httpCode,
 		ErrorCode:      errorCode,
-		ErrorID:        errorId,
+		ErrorID:        errorID,
 		Message:        message,
 		OriginalError:  originalError,
 		ExtraInfo:      extraInfo,
 	}
 }
 
+// NewError is a backwards-compatible alias for New.
+//
+// Deprecated: use New.
+func NewError(httpCode int, errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(httpCode, errorCode, message, originalError, extraInfo)
+}
+
+// Error implements the error interface, producing a log-friendly string.
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("HTTP %d - ErrorCode: %s, ErrorID: %s, Message: %s, OriginalError: %v, ExtraInfo: %v",
 		e.HTTPStatusCode, e.ErrorCode, e.ErrorID, e.Message, e.OriginalError, e.ExtraInfo)
 }
 
+// Unwrap returns the wrapped OriginalError, enabling errors.Is/errors.As.
 func (e *HTTPError) Unwrap() error {
 	return e.OriginalError
 }
 
-func NewBadRequestError(errorCode string, message string, originalError error, extraInfo any) *HTTPError {
-	return NewError(400, errorCode, message, originalError, extraInfo)
+// WithExtraInfo returns a shallow copy of e with ExtraInfo replaced.
+func (e *HTTPError) WithExtraInfo(extraInfo any) *HTTPError {
+	clone := *e
+	clone.ExtraInfo = extraInfo
+	return &clone
 }
 
-func NewUnauthorizedError(errorCode string, message string, originalError error, extraInfo any) *HTTPError {
-	return NewError(401, errorCode, message, originalError, extraInfo)
+// WithErrorCode returns a shallow copy of e with ErrorCode replaced.
+func (e *HTTPError) WithErrorCode(code string) *HTTPError {
+	clone := *e
+	clone.ErrorCode = code
+	return &clone
 }
 
-func NewForbiddenError(errorCode string, message string, originalError error, extraInfo any) *HTTPError {
-	return NewError(403, errorCode, message, originalError, extraInfo)
+func NewBadRequestError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(400, errorCode, message, originalError, extraInfo)
 }
 
-func NewNotFoundError(errorCode string, message string, originalError error, extraInfo any) *HTTPError {
-	return NewError(404, errorCode, message, originalError, extraInfo)
+func NewUnauthorizedError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(401, errorCode, message, originalError, extraInfo)
 }
 
-func NewConflictError(errorCode string, message string, originalError error, extraInfo any) *HTTPError {
-	return NewError(409, errorCode, message, originalError, extraInfo)
+func NewForbiddenError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(403, errorCode, message, originalError, extraInfo)
 }
 
-func NewTooManyRequestsError(errorCode string, message string, originalError error, extraInfo any) *HTTPError {
-	return NewError(429, errorCode, message, originalError, extraInfo)
+func NewNotFoundError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(404, errorCode, message, originalError, extraInfo)
 }
 
-func NewInternalServerError(errorCode string, message string, originalError error, extraInfo any) *HTTPError {
+func NewConflictError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(409, errorCode, message, originalError, extraInfo)
+}
+
+func NewUnprocessableEntityError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(422, errorCode, message, originalError, extraInfo)
+}
+
+func NewTooManyRequestsError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(429, errorCode, message, originalError, extraInfo)
+}
+
+func NewServiceUnavailableError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
+	return New(503, errorCode, message, originalError, extraInfo)
+}
+
+func NewInternalServerError(errorCode, message string, originalError error, extraInfo any) *HTTPError {
 	if message == "" {
-		message = defaultInternalServerErrorMessage
+		message = GetDefaultInternalServerErrorMessage()
 	}
 	if errorCode == "" {
-		errorCode = defaultInternalServerErrorCode
+		errorCode = GetDefaultInternalServerErrorCode()
 	}
-	return NewError(500, errorCode, message, originalError, extraInfo)
+	return New(500, errorCode, message, originalError, extraInfo)
 }
 
-// ConvertToHTTPError attempts to convert a generic error to an *HTTPError.
-// Returns (httpErr, converted) where converted=true means the original error was NOT an *HTTPError and a new one was created to wrap it.
-// The original error is preserved in OriginalError for server-side logging, but is not included in the JSON response.
-func ConvertToHTTPError(err error) (*HTTPError, bool) {
+// As extracts an *HTTPError from err's chain, returning it and true when found.
+func As(err error) (*HTTPError, bool) {
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
+		return httpErr, true
+	}
+	return nil, false
+}
+
+// ConvertToHTTPError converts a generic error into an *HTTPError.
+//
+// It returns (httpErr, converted). converted is true only when err was NOT
+// already an *HTTPError (in which case a wrapping 500 is created). The original
+// error is preserved in OriginalError for server-side logging.
+func ConvertToHTTPError(err error) (*HTTPError, bool) {
+	if httpErr, ok := As(err); ok {
 		return httpErr, false
 	}
-
 	return NewInternalServerError("", "", err, err), true
 }
 
-func generateErrorID() string {
+func generateErrorID(length int) string {
 	const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-	b := make([]byte, errorIDLength)
+	b := make([]byte, length)
 	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
+		b[i] = charset[rand.IntN(len(charset))]
 	}
 	return string(b)
 }

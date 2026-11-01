@@ -53,6 +53,11 @@ func GlobalConnect(ctx context.Context) error {
 	return defaultRedisClient.Connect(ctx)
 }
 
+// GlobalPing checks connectivity of the global Redis client.
+func GlobalPing(ctx context.Context) error {
+	return defaultRedisClient.Ping(ctx)
+}
+
 // GlobalReconnect closes and re-establishes the global Redis connection.
 func GlobalReconnect(ctx context.Context) error {
 	return defaultRedisClient.Reconnect(ctx)

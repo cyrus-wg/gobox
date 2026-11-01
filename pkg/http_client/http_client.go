@@ -1,3 +1,7 @@
+// Package httpclient is a small, production-tuned wrapper around net/http. It
+// provides sensible transport/timeout defaults, JSON and multipart helpers, and
+// a typed error (*ResponseError) for non-2xx responses so callers can inspect
+// the status code and body via errors.As.
 package httpclient
 
 import (
@@ -5,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -12,17 +17,47 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 )
 
-var (
-	defaultClient *http.Client
-	defaultMu     sync.RWMutex // protects defaultClient for concurrent access
-)
+// defaultClient holds the package-level *http.Client. It is stored atomically
+// so SetDefaultClient can replace it concurrently with in-flight requests.
+var defaultClient atomic.Pointer[http.Client]
 
 func init() {
-	defaultClient = NewClient(nil)
+	defaultClient.Store(NewClient(nil))
+}
+
+// ResponseError is returned by request helpers when the server responds with a
+// status code >= 400. It carries the status code and the raw response body so
+// callers can inspect the error payload:
+//
+//	_, _, err := httpclient.JSONGet(ctx, url, nil)
+//	var respErr *httpclient.ResponseError
+//	if errors.As(err, &respErr) && respErr.StatusCode == http.StatusNotFound {
+//	    // handle 404
+//	}
+type ResponseError struct {
+	StatusCode int
+	Body       []byte
+	Method     string
+	URL        string
+}
+
+// Error implements the error interface.
+func (e *ResponseError) Error() string {
+	return fmt.Sprintf("httpclient: %s %s failed with status %d: %s",
+		e.Method, e.URL, e.StatusCode, string(e.Body))
+}
+
+// AsResponseError extracts a *ResponseError from err's chain, if present.
+func AsResponseError(err error) (*ResponseError, bool) {
+	var respErr *ResponseError
+	if errors.As(err, &respErr) {
+		return respErr, true
+	}
+	return nil, false
 }
 
 // SetDefaultClient replaces the package-level client used by SendRequest and
@@ -32,19 +67,13 @@ func init() {
 // Prefer creating an *HTTPClient instance (NewHTTPClient) over replacing the
 // global when different parts of your application need different settings.
 func SetDefaultClient(client *http.Client) {
-	c := NewClient(client)
-	defaultMu.Lock()
-	defaultClient = c
-	defaultMu.Unlock()
+	defaultClient.Store(NewClient(client))
 }
 
-// getDefaultClient returns the current package-level client under the read
-// lock. Callers must not mutate the returned value; use SetDefaultClient to
-// replace it.
+// getDefaultClient returns the current package-level client. Callers must not
+// mutate the returned value; use SetDefaultClient to replace it.
 func getDefaultClient() *http.Client {
-	defaultMu.RLock()
-	defer defaultMu.RUnlock()
-	return defaultClient
+	return defaultClient.Load()
 }
 
 // NewClient populates zero/nil fields in client with production-ready defaults
@@ -203,11 +232,16 @@ func doRequest(ctx context.Context, client *http.Client, method, url string, bod
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, nil, err
+		return resp.StatusCode, nil, fmt.Errorf("httpclient: failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
-		return resp.StatusCode, respBody, fmt.Errorf("HTTP request failed with status %d: %s", resp.StatusCode, string(respBody))
+		return resp.StatusCode, respBody, &ResponseError{
+			StatusCode: resp.StatusCode,
+			Body:       respBody,
+			Method:     method,
+			URL:        url,
+		}
 	}
 
 	return resp.StatusCode, respBody, nil
@@ -430,4 +464,61 @@ func (hc *HTTPClient) FormPut(ctx context.Context, url string, fields map[string
 
 func (hc *HTTPClient) FormPatch(ctx context.Context, url string, fields map[string]string, files []FormFile, headers map[string]string) (int, []byte, error) {
 	return hc.SendFormRequest(ctx, http.MethodPatch, url, fields, files, headers)
+}
+
+// Client returns the underlying *http.Client. Treat it as read-only.
+func (hc *HTTPClient) Client() *http.Client {
+	return hc.client
+}
+
+// ---------------------------------------------------------------------------
+// Typed JSON decoding helpers
+// ---------------------------------------------------------------------------
+
+// GetJSON issues a GET and decodes a 2xx JSON response body into *out.
+// On a non-2xx response it returns the status code and a *ResponseError
+// (out is left untouched). It is a generic convenience over the package-level
+// default client.
+//
+//	user, status, err := httpclient.GetJSON[User](ctx, url, nil)
+func GetJSON[T any](ctx context.Context, url string, headers map[string]string) (T, int, error) {
+	return requestJSON[T](ctx, getDefaultClient(), http.MethodGet, url, nil, headers)
+}
+
+// PostJSON issues a POST with a JSON-encoded body and decodes a 2xx JSON
+// response into T.
+func PostJSON[T any](ctx context.Context, url string, body any, headers map[string]string) (T, int, error) {
+	return requestJSON[T](ctx, getDefaultClient(), http.MethodPost, url, body, headers)
+}
+
+// PutJSON issues a PUT with a JSON-encoded body and decodes a 2xx JSON
+// response into T.
+func PutJSON[T any](ctx context.Context, url string, body any, headers map[string]string) (T, int, error) {
+	return requestJSON[T](ctx, getDefaultClient(), http.MethodPut, url, body, headers)
+}
+
+// PatchJSON issues a PATCH with a JSON-encoded body and decodes a 2xx JSON
+// response into T.
+func PatchJSON[T any](ctx context.Context, url string, body any, headers map[string]string) (T, int, error) {
+	return requestJSON[T](ctx, getDefaultClient(), http.MethodPatch, url, body, headers)
+}
+
+// requestJSON performs an application/json request and decodes the response
+// body into T when the status is < 400.
+func requestJSON[T any](ctx context.Context, client *http.Client, method, url string, body any, headers map[string]string) (T, int, error) {
+	var out T
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	status, respBody, err := doRequest(ctx, client, method, url, body, jsonHeaders(headers))
+	if err != nil {
+		return out, status, err
+	}
+	if len(respBody) == 0 {
+		return out, status, nil
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return out, status, fmt.Errorf("httpclient: failed to decode JSON response: %w", err)
+	}
+	return out, status, nil
 }

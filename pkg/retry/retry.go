@@ -1,9 +1,14 @@
+// Package retry provides context-aware retry helpers with exponential backoff,
+// optional jitter, a retryable-error predicate, and per-attempt callbacks.
+//
+// Do returns a value; Run is the error-only variant. Both stop early when the
+// context is cancelled or its deadline is exceeded.
 package retry
 
 import (
 	"context"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 )
 
@@ -54,6 +59,12 @@ type Config struct {
 	// and the error returned by that attempt.
 	// If nil (the default), no callback is invoked.
 	OnRetry func(ctx context.Context, attempt int, err error)
+
+	// MaxElapsedTime is an overall wall-clock budget for all attempts and
+	// backoff delays combined. When > 0, the retry loop stops once the budget
+	// is exceeded and returns the last error. Zero (the default) means no
+	// overall limit — only MaxAttempts and the context bound the loop.
+	MaxElapsedTime time.Duration
 }
 
 // Option configures retry behaviour.
@@ -123,6 +134,13 @@ func WithOnRetry(fn func(ctx context.Context, attempt int, err error)) Option {
 	return func(c *Config) { c.OnRetry = fn }
 }
 
+// WithMaxElapsedTime sets an overall wall-clock budget for the whole retry
+// operation (all attempts plus backoff). When the budget is exhausted the loop
+// stops and returns the last error. Zero disables the overall limit.
+func WithMaxElapsedTime(d time.Duration) Option {
+	return func(c *Config) { c.MaxElapsedTime = d }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -143,6 +161,14 @@ func Do[T any](ctx context.Context, fn func(ctx context.Context) (T, error), opt
 
 	var zero T
 	var lastErr error
+
+	// Apply the overall time budget by deriving a child context, so both the
+	// sleep between retries and fn itself observe the deadline.
+	if cfg.MaxElapsedTime > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.MaxElapsedTime)
+		defer cancel()
+	}
 
 	for attempt := range cfg.MaxAttempts {
 		if attempt > 0 {

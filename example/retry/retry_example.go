@@ -110,5 +110,15 @@ func main() {
 		attempt++
 		return errTemporary
 	}, retry.WithMaxAttempts(100), retry.WithInitialDelay(20*time.Millisecond))
-	fmt.Printf("  attempts=%d err=%v\n", attempt, err)
+	fmt.Printf("  attempts=%d err=%v\n\n", attempt, err)
+
+	// --- MaxElapsedTime budget ---
+	fmt.Println("// Run — MaxElapsedTime caps total retry time")
+	start = time.Now()
+	attempt = 0
+	err = retry.Run(ctx, func(ctx context.Context) error {
+		attempt++
+		return errTemporary
+	}, retry.WithMaxAttempts(100), retry.WithInitialDelay(20*time.Millisecond), retry.WithMaxElapsedTime(80*time.Millisecond))
+	fmt.Printf("  attempts=%d elapsed=%v err=%v\n", attempt, time.Since(start).Round(time.Millisecond), err)
 }

@@ -111,6 +111,35 @@ func TestOrDefaultPtr_ZeroPointee(t *testing.T) {
 	}
 }
 
+// ─── Deref / Ptr ────────────────────────────────────────────────────────────
+
+func TestDeref_NonNil(t *testing.T) {
+	v := 42
+	if got := Deref(&v); got != 42 {
+		t.Errorf("Deref(&42) = %d, want 42", got)
+	}
+}
+
+func TestDeref_Nil(t *testing.T) {
+	if got := Deref[int](nil); got != 0 {
+		t.Errorf("Deref(nil) = %d, want 0", got)
+	}
+	if got := Deref[string](nil); got != "" {
+		t.Errorf("Deref[string](nil) = %q, want empty", got)
+	}
+}
+
+func TestPtr_RoundTrip(t *testing.T) {
+	p := Ptr("hello")
+	if p == nil || *p != "hello" {
+		t.Fatalf("Ptr(\"hello\") did not round-trip: %v", p)
+	}
+	// Deref(Ptr(x)) == x
+	if Deref(Ptr(7)) != 7 {
+		t.Fatal("Deref(Ptr(7)) != 7")
+	}
+}
+
 // ─── OrDefaultFunc ──────────────────────────────────────────────────────────
 
 func TestOrDefaultFunc_NonZero(t *testing.T) {

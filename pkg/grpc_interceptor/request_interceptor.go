@@ -9,6 +9,7 @@ import (
 	"github.com/cyrus-wg/gobox/pkg/logger"
 	"github.com/cyrus-wg/gobox/pkg/pattern"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -40,18 +41,22 @@ func RequestUnaryInterceptor(logRequestDetails bool, logCompleteTime bool, bypas
 		latency := time.Since(startTime)
 
 		if logCompleteTime && !shouldSkipLogging {
-			fields := []any{
+			logger.Infow(ctx, "gRPC request completed",
 				"latency_ms", latency.Milliseconds(),
-			}
-			if err != nil {
-				st, _ := status.FromError(err)
-				fields = append(fields, "grpc_code", st.Code().String())
-			}
-			logger.Infow(ctx, "gRPC request completed", fields...)
+				"grpc_code", codeOf(err).String(),
+			)
 		}
 
 		return resp, err
 	}
+}
+
+// codeOf returns the gRPC status code for err, or codes.OK when err is nil.
+func codeOf(err error) codes.Code {
+	if err == nil {
+		return codes.OK
+	}
+	return status.Code(err)
 }
 
 func RequestStreamInterceptor(logRequestDetails bool, logCompleteTime bool, bypassList ...BypassRequestLogging) grpc.StreamServerInterceptor {
@@ -85,20 +90,19 @@ func RequestStreamInterceptor(logRequestDetails bool, logCompleteTime bool, bypa
 		latency := time.Since(startTime)
 
 		if logCompleteTime && !shouldSkipLogging {
-			fields := []any{
+			logger.Infow(ctx, "gRPC stream request completed",
 				"latency_ms", latency.Milliseconds(),
-			}
-			if err != nil {
-				st, _ := status.FromError(err)
-				fields = append(fields, "grpc_code", st.Code().String())
-			}
-			logger.Infow(ctx, "gRPC stream request completed", fields...)
+				"grpc_code", codeOf(err).String(),
+			)
 		}
 
 		return err
 	}
 }
 
+// BypassRequestLogging describes a rule that suppresses request logging for
+// matching gRPC methods. Method is an Ant-style glob by default, or a regular
+// expression when IsRegex is true.
 type BypassRequestLogging struct {
 	Method  string         // Full gRPC method name (e.g., "/package.Service/Method"), Ant-style glob by default
 	IsRegex bool           // If true, Method is treated as a regex pattern; otherwise Ant-style pattern
@@ -110,7 +114,7 @@ func compileBypassPatterns(patterns []BypassRequestLogging) []BypassRequestLoggi
 	for i, p := range patterns {
 		compiled[i] = p
 		if p.IsRegex {
-			if re, err := regexp.Compile("^" + p.Method + "$"); err == nil {
+			if re, err := pattern.Compile(p.Method); err == nil {
 				compiled[i].regex = re
 			}
 		}

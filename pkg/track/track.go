@@ -31,7 +31,7 @@ import (
 func TrackTime(ctx context.Context, indicator ...string) func() {
 	// One frame to skip: TrackTime itself. trackTimeAt adds one more for
 	// its own frame.
-	return trackTimeAt(ctx, 1, indicator...)
+	return trackTimeAt(ctx, 1, nil, indicator...)
 }
 
 // TrackTimeSkip behaves like TrackTime but lets the caller skip additional
@@ -46,13 +46,24 @@ func TrackTimeSkip(ctx context.Context, skip int, indicator ...string) func() {
 	if skip < 0 {
 		skip = 0
 	}
-	return trackTimeAt(ctx, skip+1, indicator...)
+	return trackTimeAt(ctx, skip+1, nil, indicator...)
+}
+
+// TrackTimeWith behaves like TrackTime but attaches additional structured
+// key-value pairs to the emitted log entry. This is useful for correlating the
+// duration with domain-specific attributes:
+//
+//	defer track.TrackTimeWith(ctx, "handleOrder",
+//	    "order_id", orderID, "customer", customerID)()
+func TrackTimeWith(ctx context.Context, indicator string, keysAndValues ...any) func() {
+	return trackTimeAt(ctx, 1, keysAndValues, indicator)
 }
 
 // trackTimeAt is the shared implementation. skip is the number of stack frames
 // to skip *above* trackTimeAt (i.e. skip=1 means the immediate caller of
-// trackTimeAt, skip=2 means that caller's caller, ...).
-func trackTimeAt(ctx context.Context, skip int, indicator ...string) func() {
+// trackTimeAt, skip=2 means that caller's caller, ...). extra holds optional
+// user-supplied key-value pairs appended to the log entry.
+func trackTimeAt(ctx context.Context, skip int, extra []any, indicator ...string) func() {
 	start := time.Now()
 
 	idc := ""
@@ -67,11 +78,12 @@ func trackTimeAt(ctx context.Context, skip int, indicator ...string) func() {
 		// Still log the duration — the user explicitly asked to track
 		// something, so a missing caller shouldn't silently drop it.
 		return func() {
-			logger.Infow(ctx, "Track time",
+			fields := append([]any{
 				"indicator", idc,
 				"start", start,
 				"duration_ms", durationMS(start),
-			)
+			}, extra...)
+			logger.Infow(ctx, "Track time", fields...)
 		}
 	}
 
@@ -83,14 +95,15 @@ func trackTimeAt(ctx context.Context, skip int, indicator ...string) func() {
 	}
 
 	return func() {
-		logger.Infow(ctx, "Track time",
+		fields := append([]any{
 			"indicator", idc,
 			"file", file,
 			"function", fnName,
 			"line", line,
 			"start", start,
 			"duration_ms", durationMS(start),
-		)
+		}, extra...)
+		logger.Infow(ctx, "Track time", fields...)
 	}
 }
 

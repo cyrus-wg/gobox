@@ -3,7 +3,6 @@ package gormdb
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -126,7 +125,7 @@ func (dbc *DBClient) Connect(ctx context.Context) error {
 	config := dbc.GetConfig()
 
 	if config.DSN == "" {
-		return errors.New("gormdb: DSN is required")
+		return ErrDSNRequired
 	}
 
 	// Open the primary (writer) connection.
@@ -217,6 +216,34 @@ func (dbc *DBClient) Close() error {
 		return fmt.Errorf("gormdb: cannot obtain *sql.DB for close: %w", err)
 	}
 	return sqlDB.Close()
+}
+
+// Ping verifies the connection is alive by pinging the underlying *sql.DB.
+// It returns ErrNotConnected when Connect has not been called.
+func (dbc *DBClient) Ping(ctx context.Context) error {
+	db := dbc.GetDB()
+	if db == nil {
+		return ErrNotConnected
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("gormdb: cannot obtain *sql.DB: %w", err)
+	}
+	return sqlDB.PingContext(ctx)
+}
+
+// Stats returns the connection-pool statistics of the underlying *sql.DB.
+// It returns ErrNotConnected when Connect has not been called.
+func (dbc *DBClient) Stats() (sql.DBStats, error) {
+	db := dbc.GetDB()
+	if db == nil {
+		return sql.DBStats{}, ErrNotConnected
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return sql.DBStats{}, fmt.Errorf("gormdb: cannot obtain *sql.DB: %w", err)
+	}
+	return sqlDB.Stats(), nil
 }
 
 func (dbc *DBClient) BeginTransaction(opts ...*sql.TxOptions) *gorm.DB {
@@ -384,6 +411,6 @@ func newDialector(driver Driver, dsn string) (gorm.Dialector, error) {
 	case PostgreSQL:
 		return postgres.Open(dsn), nil
 	default:
-		return nil, fmt.Errorf("gormdb: unsupported driver %q (supported: mysql, postgres)", driver)
+		return nil, fmt.Errorf("%w: %q (supported: mysql, postgres)", ErrUnsupportedDriver, driver)
 	}
 }

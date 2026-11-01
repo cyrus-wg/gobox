@@ -99,3 +99,13 @@ func ExecRawSQL(tx *gorm.DB, sql string, values ...any) *gorm.DB {
 func Create(ctx context.Context, value any, tx ...*gorm.DB) error {
 	return defaultDBClient.Create(ctx, value, tx...)
 }
+
+// Ping verifies connectivity of the global client's underlying *sql.DB.
+func Ping(ctx context.Context) error {
+	return defaultDBClient.Ping(ctx)
+}
+
+// Stats returns the connection-pool statistics of the global client.
+func Stats() (sql.DBStats, error) {
+	return defaultDBClient.Stats()
+}

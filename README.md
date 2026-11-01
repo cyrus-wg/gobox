@@ -40,6 +40,25 @@ gobox/
 
 Explore the `pkg/` directory for available packages and the `example/` directory for practical usage references.
 
+## 📦 Packages
+
+| Package | Purpose |
+| --- | --- |
+| [`functional`](pkg/functional) | Generic slice / map helpers (Map, Filter, Reduce, GroupBy, Chunk, Unique...) plus lazy `iter.Seq` pipelines (Seq, MapSeq, FilterSeq, TakeSeq) |
+| [`retry`](pkg/retry) | Configurable retry with exponential backoff, jitter, retryable-error predicates, and MaxElapsedTime budget |
+| [`http_client`](pkg/http_client) | Typed JSON client with generics (`GetJSON[T]`, `PostJSON[T]`) and structured `ResponseError` handling |
+| [`http_error`](pkg/http_error) | HTTP status-code errors with configurable error-message generators and sentinels |
+| [`http_response`](pkg/http_response) | JSON response writing helpers that reuse typed HTTP errors |
+| [`gorm_db`](pkg/gorm_db) | Generic GORM repository — type-safe `Create`/`GetByID`/`List`/`Update`/`Delete`/`Count` with sentinel errors |
+| [`redis_db`](pkg/redis_db) | Redis helpers built on go-redis with sentinel errors |
+| [`logger`](pkg/logger) | Zap wrapper with atomic global access, child loggers (`With`/`Named`), and runtime level control |
+| [`grpc_interceptor`](pkg/grpc_interceptor) | gRPC interceptors: panic recovery, request logging, request validation |
+| [`middleware`](pkg/middleware) | HTTP middleware: logging with status/bytes captured, CORS, request-ID, recovery |
+| [`graceful_shutdown`](pkg/graceful_shutdown) | Signal-driven graceful server shutdown with health checks |
+| [`pick`](pkg/pick) | Generic selection helpers: `If`, `OrDefault`, `Coalesce`, `Deref`, `Ptr`, string parsers |
+| [`track`](pkg/track) | Deferred timing helpers (`TrackTime`, `TrackTimeWith`) that log durations with caller location |
+| [`pattern`](pkg/pattern) | Miscellaneous pattern utilities |
+
 ## 🛠️ Usage
 
 Import the specific package you need directly:
@@ -47,5 +66,7 @@ Import the specific package you need directly:
 ```go
 import "github.com/cyrus-wg/gobox/pkg/<package_name>"
 ```
+
+Requires **Go 1.27+** (uses `iter.Seq`, generics, and `math/rand/v2`).
 
 Refer to the [`example/`](example/) directory for detailed usage demonstrations.
